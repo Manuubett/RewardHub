@@ -1,18 +1,18 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
-import { getFunctions } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyA1i_yuMePpMJ0P2nL9j3kH_-TEfqpJQIE",
-  authDomain: "rewardhub-33659.firebaseapp.com",
-  projectId: "rewardhub-33659",
-  storageBucket: "rewardhub-33659.firebasestorage.app",
-  messagingSenderId: "469096404213",
-  appId: "1:469096404213:web:ce79199bba1badf91e61bc",
-  measurementId: "G-H8F4X3J20D"
+  apiKey: "AIzaSyBDbpJNfAdmkZ-fAfGsiUYY0OWPWJ_e_IM",
+  authDomain: "manuu-27475.firebaseapp.com",
+  projectId: "manuu-27475",
+  storageBucket: "manuu-27475.firebasestorage.app",
+  messagingSenderId: "443796877180",
+  appId: "1:443796877180:web:b89c9aae6fb106e0047ef9",
+  measurementId: "G-E7G5H7FTSB"
 };
 
-
 const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app), db = getFirestore(app), functions = getFunctions(app, 'us-central1');
+export const auth = getAuth(app), db = getFirestore(app);
+// Your own server's address. Must be https:// when the site is on GitHub Pages.
+export const API_URL = 'http://localhost:3000';

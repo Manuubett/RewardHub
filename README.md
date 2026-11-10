@@ -1,53 +1,41 @@
-# RewardHub setup
+# RewardHub setup (own Node server)
 
-## 1. Firebase project
-1. console.firebase.google.com > create a project.
-2. Build > Authentication > enable **Email/Password**.
-3. Build > Firestore Database > create (production mode).
-4. Upgrade to **Blaze** plan (required for Cloud Functions; free tier usage still applies).
-5. Project settings > Your apps > Web app > copy the config into `firebase-config.js`.
+Website (HTML/JS) + Firebase Auth/Firestore + your own server in `server/`. No Cloud Functions, no Blaze plan needed.
 
-## 2. Deploy
-```
-npm i -g firebase-tools && firebase login
-firebase init        # choose Firestore, Functions (JavaScript), Hosting (public dir = .)
-                     # keep my firestore.rules and functions/ files when asked to overwrite: say NO
-firebase deploy
-```
+## 1. Firebase
+1. Authentication > enable **Email/Password**. Firestore Database > create.
+2. Publish `firestore.rules`: Firestore > Rules > paste the file > Publish.
+3. Project settings > Service accounts > **Generate new private key**. Save as `server/serviceAccountKey.json`.
+   Never upload this file to GitHub or share it.
 
-## 3. Make yourself admin
-Register normally on the site, then:
+## 2. Run the server
 ```
-cd functions && npm i
-GOOGLE_APPLICATION_CREDENTIALS=serviceAccountKey.json node setAdmin.js you@email.com
+cd server
+npm install
+cp .env.example .env        # set ALLOWED_ORIGINS to your site, e.g. https://manuubett.github.io
+npm start
 ```
-Log out and in. An **Admin** tab appears.
+Test: open http://localhost:3000/health and you should see `ok`.
 
-## 4. Onboard an advertising partner
-Admin > Advertising partners > Add partner. Give the partner:
-- their **Partner ID** and **Secret**
-- the postback URL: `https://us-central1-YOUR_PROJECT.cloudfunctions.net/postback`
+## 3. Host the server (needed for real use)
+Your site is on GitHub Pages (https), so the server must also be **https**. Options: Render, Railway, Fly.io or a VPS with Caddy/Nginx.
+Upload the `server` folder, set env vars `ALLOWED_ORIGINS` and `SERVICE_ACCOUNT` (or add the key as a secret file), start command `npm start`.
+Then set `API_URL` in `firebase-config.js` to your server address and push the site.
 
-They call it server-to-server:
+## 4. Make yourself admin
+Register on the site, then in `server/`: `node setAdmin.js you@email.com`. Log out and in; the Admin tab appears.
+
+## 5. Onboard an advertising partner
+Admin > Advertising partners > Add partner. Give them their Partner ID, Secret and your postback URL:
 ```
-GET /postback?partner=ID&click_id={click_id}&txn_id={their_unique_txn}&event=conversion&sig=SIG
+GET https://YOUR-SERVER/postback?partner=ID&click_id={click_id}&txn_id={unique}&event=conversion&sig=SIG
 SIG = hex HMAC-SHA256(secret, "click_id|txn_id|event")
 ```
-Events: `conversion` (or `valid_click` for click campaigns) > pending, `approved` > withdrawable, `reversed` > deducted.
-When you add a campaign, your tracking URL receives `click_id` automatically; the partner must echo it back.
+Events: `conversion` (or `valid_click`) > pending, `approved` > withdrawable, `reversed` > deducted.
 
-## Fraud controls built in
-| # | Control | Where |
-|---|---|---|
-| 1 | Clicks never pay; only partner postbacks do (`cpc` campaigns need a partner-signed `valid_click`) | `postback` |
-| 2 | Signed server-to-server postback, HMAC checked | `postback` |
-| 3 | Unique `partner_txn_event` doc blocks duplicate rewards | `postback` transaction |
-| 4 | Rewards stay pending until `approved` | `postback` |
-| 5 | `reversed` deducts the reward (balance can go negative, blocking withdrawals) | `postback` |
-| 6 | One phone per account, shared-device accounts flagged and blocked from withdrawing, admin can suspend | `registerProfile`, Admin |
-| 7 | Append-only `ledger`, written only by functions (client writes denied by rules) | rules + functions |
+## Fraud controls
+Clicks never pay; signed server-to-server postbacks only; unique transaction IDs; pending until approved; reversals deducted; one phone per account and shared devices flagged; ledger written only by the server (Firestore rules block client writes); rate limiting per IP.
 
-## Not included yet (be aware)
-- **M-Pesa payout is manual**: admin sends money, then clicks *Mark paid*. To automate, add Safaricom Daraja B2C inside `adminDecideWithdrawal` before marking paid.
-- Device check is a simple browser ID; add Firebase App Check + reCAPTCHA and IP rate limiting before launch.
-- Get a lawyer/accountant to review terms, data protection (Kenya DPA) and tax before handling real advertiser money.
+## Not included yet
+- M-Pesa payout is manual (send money, click *Mark paid*). Daraja B2C can be added in `adminDecideWithdrawal`.
+- Add reCAPTCHA / App Check and IP checks before launch. Get terms, tax and data-protection advice before handling advertiser money.
