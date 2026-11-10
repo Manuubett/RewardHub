@@ -1,13 +1,14 @@
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin'); const crypto = require('crypto');
 admin.initializeApp(); const db = admin.firestore(); const FV = admin.firestore.FieldValue;
+const OPTS = { cors: true, invoker: 'public', region: 'us-central1' };
 const MIN_WITHDRAW = 100;
 const uidOf = c => { if (!c.auth) throw new HttpsError('unauthenticated', 'Sign in first.'); return c.auth.uid; };
 const adminOnly = c => { if (!c.auth || c.auth.token.admin !== true) throw new HttpsError('permission-denied', 'Admins only.'); };
 const ledger = (t, e) => t.set(db.collection('ledger').doc(), { ...e, createdAt: FV.serverTimestamp() });
 
 // Fraud #6: one phone per account; same device on another account => flagged
-exports.registerProfile = onCall(async ({ auth, data }) => {
+exports.registerProfile = onCall(OPTS, async ({ auth, data }) => {
   const uid = uidOf({ auth }); const { name, phone, deviceId } = data;
   if (!/^2547\d{8}$|^2541\d{8}$/.test(phone || '')) throw new HttpsError('invalid-argument', 'Phone must look like 2547XXXXXXXX.');
   if (!deviceId || !name) throw new HttpsError('invalid-argument', 'Missing details.');
@@ -22,7 +23,7 @@ exports.registerProfile = onCall(async ({ auth, data }) => {
 });
 
 // Creates the tracked click. Reward is NOT given here (Fraud #1).
-exports.startTask = onCall(async ({ auth, data }) => {
+exports.startTask = onCall(OPTS, async ({ auth, data }) => {
   const uid = uidOf({ auth }); const user = (await db.doc('users/' + uid).get()).data();
   if (!user || user.status === 'suspended') throw new HttpsError('permission-denied', 'Account suspended.');
   const c = await db.doc('campaigns/' + data.campaignId).get();
@@ -38,7 +39,7 @@ exports.startTask = onCall(async ({ auth, data }) => {
 
 // Partner server-to-server postback (Fraud #2,3,4,5)
 // GET /postback?partner=ID&click_id=..&txn_id=..&event=conversion|valid_click|approved|reversed&sig=HMAC_SHA256(secret, click_id|txn_id|event)
-exports.postback = onRequest(async (req, res) => {
+exports.postback = onRequest({ invoker: 'public' }, async (req, res) => {
   try {
     const { partner, click_id, txn_id, event, sig } = req.query;
     if (!partner || !click_id || !txn_id || !event || !sig) return res.status(400).send('missing params');
@@ -77,7 +78,7 @@ exports.postback = onRequest(async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send('error'); }
 });
 
-exports.requestWithdrawal = onCall(async ({ auth, data }) => {
+exports.requestWithdrawal = onCall(OPTS, async ({ auth, data }) => {
   const uid = uidOf({ auth }); const amount = Number(data.amount);
   if (!Number.isInteger(amount) || amount < MIN_WITHDRAW) throw new HttpsError('invalid-argument', `Minimum is KES ${MIN_WITHDRAW}.`);
   await db.runTransaction(async t => {
@@ -95,7 +96,7 @@ exports.requestWithdrawal = onCall(async ({ auth, data }) => {
 });
 
 // Admin pays via M-Pesa (manual or add Daraja B2C here), then marks paid; reject refunds the balance.
-exports.adminDecideWithdrawal = onCall(async ({ auth, data }) => {
+exports.adminDecideWithdrawal = onCall(OPTS, async ({ auth, data }) => {
   adminOnly({ auth }); const { id, decision, note = '' } = data;
   await db.runTransaction(async t => {
     const wRef = db.doc('withdrawals/' + id); const w = (await t.get(wRef)).data();
@@ -110,7 +111,7 @@ exports.adminDecideWithdrawal = onCall(async ({ auth, data }) => {
   return { ok: true };
 });
 
-exports.adminSetUserStatus = onCall(async ({ auth, data }) => {
+exports.adminSetUserStatus = onCall(OPTS, async ({ auth, data }) => {
   adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
   await db.doc('users/' + data.uid).update({ status: data.status }); return { ok: true };
 });
