@@ -11,7 +11,9 @@ const db = admin.firestore(); const FV = admin.firestore.FieldValue;
 const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409 };
 class HttpsError extends Error { constructor(code, msg) { super(msg); this.status = STATUS[code] || 400; } }
 
-const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '20kb' }));
+const app = express(); app.set('trust proxy', 1);
+app.use((req, _res, next) => { req.url = req.url.replace(/\/{2,}/g, '/'); next(); });   // tolerate // in URLs
+ app.use(express.json({ limit: '20kb' }));
 const origins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 app.use(cors({ origin: origins.length ? origins : false }));
 app.use(rateLimit({ windowMs: 60e3, max: 60 }));          // basic abuse limit per IP
