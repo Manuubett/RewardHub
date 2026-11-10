@@ -20,7 +20,7 @@ let user = null, profile = null, isAdmin = false, unsub = null;
 onAuthStateChanged(auth, async u => {
   user = u; unsub?.(); profile = null; isAdmin = false;
   if (u) {
-    isAdmin = (await u.getIdTokenResult(true)).claims.admin === true;
+    isAdmin = await getDoc(doc(db, 'admins', u.uid)).then(d => d.exists(), () => false);
     unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|support|admin|task/.test(location.hash)) route(); }, () => {});
   }
   route();

@@ -33,7 +33,8 @@ app.get('/health', (_, r) => r.send('ok'));
 
 const MIN_WITHDRAW = 100;
 const uidOf = c => { if (!c.auth) throw new HttpsError('unauthenticated', 'Sign in first.'); return c.auth.uid; };
-const adminOnly = c => { if (!c.auth || c.auth.token.admin !== true) throw new HttpsError('permission-denied', 'Admins only.'); };
+// Admin = a document in Firestore collection `admins` whose ID is the user's UID (only you can create it, in the console)
+const adminOnly = async c => { if (!c.auth || !(await db.doc('admins/' + c.auth.uid).get()).exists) throw new HttpsError('permission-denied', 'Admins only.'); };
 const ledger = (t, e) => t.set(db.collection('ledger').doc(), { ...e, createdAt: FV.serverTimestamp() });
 
 // Fraud #6: one phone per account; same device on another account => flagged
@@ -137,7 +138,7 @@ async function darajaToken() {
 // decision: 'mpesa' (send via B2C) | 'paid' (you already paid manually) | 'rejected' (refund balance)
 // Statuses: pending > submitting > submitted > paid | failed(refunded) | needs_review (timeout: reconcile manually, NO auto refund)
 api('adminDecideWithdrawal', async ({ auth, data }) => {
-  adminOnly({ auth }); const { id, decision, note = '' } = data; const wRef = db.doc('withdrawals/' + id);
+  await adminOnly({ auth }); const { id, decision, note = '' } = data; const wRef = db.doc('withdrawals/' + id);
   if (decision === 'mpesa') {
     if (!mpesaReady()) throw new HttpsError('failed-precondition', 'M-Pesa is not configured on the server (see README).');
     await db.runTransaction(async t => {   // lock first so it can never be sent twice
@@ -204,7 +205,7 @@ app.post('/mpesa/:kind', async (req, res) => {
 });
 
 api('adminSetUserStatus', async ({ auth, data }) => {
-  adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
+  await adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
   await db.doc('users/' + data.uid).update({ status: data.status }); return { ok: true };
 });
 

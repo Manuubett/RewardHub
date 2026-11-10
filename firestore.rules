@@ -1,9 +1,10 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{d}/documents {
-    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+    function isAdmin() { return request.auth != null && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
     function mine() { return request.auth != null && request.auth.uid == resource.data.uid; }
     // Money-bearing collections are written ONLY by Cloud Functions (Admin SDK bypasses rules).
+    match /admins/{u}       { allow get: if request.auth != null && request.auth.uid == u; }
     match /users/{u}        { allow read: if (request.auth != null && request.auth.uid == u) || isAdmin(); }
     match /tasks/{t}        { allow read: if mine() || isAdmin(); }
     match /ledger/{l}       { allow read: if mine() || isAdmin(); }
