@@ -1,7 +1,11 @@
 require('dotenv').config();
 const express = require('express'), cors = require('cors'), crypto = require('crypto'), rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
-admin.initializeApp({ credential: admin.credential.cert(require(process.env.SERVICE_ACCOUNT || './serviceAccountKey.json')) });
+// Key comes from SERVICE_ACCOUNT_JSON (hosting) or a local file (your PC)
+let key;
+try { key = process.env.SERVICE_ACCOUNT_JSON ? JSON.parse(process.env.SERVICE_ACCOUNT_JSON) : require(process.env.SERVICE_ACCOUNT || './serviceAccountKey.json'); }
+catch (e) { console.error('No Firebase key found. On Render set the SERVICE_ACCOUNT_JSON environment variable to the full contents of your key file (valid JSON).'); process.exit(1); }
+admin.initializeApp({ credential: admin.credential.cert(key) });
 const db = admin.firestore(); const FV = admin.firestore.FieldValue;
 
 const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409 };
