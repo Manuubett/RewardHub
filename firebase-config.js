@@ -11,5 +11,5 @@ const firebaseConfig = {
   messagingSenderId: "443796877180",
   appId: "1:443796877180:web:b89c9aae6fb106e0047ef9",
   measurementId: "G-E7G5H7FTSB"
-};
+}};
 export const auth = getAuth(app), db = getFirestore(app), functions = getFunctions(app, 'us-central1');
