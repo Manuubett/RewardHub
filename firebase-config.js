@@ -15,4 +15,4 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app), db = getFirestore(app);
 // Your own server's address. Must be https:// when the site is on GitHub Pages.
-export const API_URL = 'http://localhost:3000';
+export const API_URL = 'https://rewardhub-7vgx.onrender.com/';
