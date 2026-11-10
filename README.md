@@ -36,6 +36,14 @@ Events: `conversion` (or `valid_click`) > pending, `approved` > withdrawable, `r
 ## Fraud controls
 Clicks never pay; signed server-to-server postbacks only; unique transaction IDs; pending until approved; reversals deducted; one phone per account and shared devices flagged; ledger written only by the server (Firestore rules block client writes); rate limiting per IP.
 
+## M-Pesa B2C withdrawals (from your EarnHub starter)
+Fill the `MPESA_*`, `PUBLIC_URL` and `CALLBACK_TOKEN` values in `server/.env`. Start with `MPESA_ENV=sandbox`.
+Admin > Withdrawal requests then shows **Pay via M-Pesa**. Flow: pending > submitting > submitted > paid, or failed (balance refunded).
+- Safaricom calls `PUBLIC_URL/mpesa/result` and `/mpesa/timeout`; both need the token and must be reachable over https.
+- A **timeout never refunds automatically**: it becomes `needs_review`. Check the Daraja portal, then click *Mark paid (manual)* or *Reject* (refunds).
+- If the server can't tell whether money was sent (`submission_error`), do not retry until you have checked in Daraja.
+- Without the M-Pesa values the manual *Mark paid* button still works.
+- You need approved Safaricom B2C production access, shortcode and security credential before real payouts.
+
 ## Not included yet
-- M-Pesa payout is manual (send money, click *Mark paid*). Daraja B2C can be added in `adminDecideWithdrawal`.
 - Add reCAPTCHA / App Check and IP checks before launch. Get terms, tax and data-protection advice before handling advertiser money.

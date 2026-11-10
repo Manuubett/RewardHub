@@ -54,7 +54,7 @@ const pages = {
 
   login: () => user ? (location.hash = '#/dashboard', '') : `<h1>Welcome</h1><form id="f">
   <div id="reg" hidden><label>Full name<input name="name" autocomplete="name"></label>
-  <label>M-Pesa phone (2547XXXXXXXX)<input name="phone" inputmode="numeric" autocomplete="tel"></label></div>
+  <label>M-Pesa phone (e.g. 0712345678)<input name="phone" inputmode="numeric" autocomplete="tel"></label></div>
   <label>Email<input name="email" type="email" required autocomplete="email"></label>
   <label>Password (6+ characters)<input name="pw" type="password" required minlength="6" autocomplete="current-password"></label>
   <button>Log in</button> <button type="button" class="alt" id="tog">Create account instead</button><div id="m"></div></form>`,
@@ -130,7 +130,7 @@ const pages = {
     <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>
     <h2>Withdrawal requests</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Phone</th><th>Amount</th><th>Status</th><th></th></tr>
     ${wd.sort(byDate).map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(w.phone)}</td><td>${kes(w.amount)}</td><td class="${w.status}">${w.status}</td>
-    <td>${w.status === 'pending' ? `<button data-w="${w.id}" data-d="paid">Mark paid</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject</button>` : ''}</td></tr>`).join('') || '<tr><td colspan=6>None.</td></tr>'}</table></div>
+    <td>${['pending', 'submission_failed'].includes(w.status) ? `<button data-w="${w.id}" data-d="mpesa">Pay via M-Pesa</button> ` : ''}${['pending', 'submission_failed', 'submission_error', 'needs_review'].includes(w.status) ? `<button class="alt" data-w="${w.id}" data-d="paid">Mark paid (manual)</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject</button>` : ''}</td></tr>`).join('') || '<tr><td colspan=6>None.</td></tr>'}</table></div>
     <h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
     ${sus.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${u.status}">${u.status}</td><td>${esc((u.flags || []).join(', '))}</td><td>${ub(u, 'suspended', 'Suspend')} ${ub(u, 'active', 'Clear')}</td></tr>`).join('') || '<tr><td colspan=5>Nothing flagged.</td></tr>'}</table></div>
     <h2>Advertising partners</h2><form id="pf" class="wide" style="display:flex;gap:.5rem"><input name="n" placeholder="Partner name" required><button>Add partner</button></form>
@@ -171,7 +171,7 @@ const bind = {
   support() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); await addDoc(collection(db, 'tickets'), { uid: user.uid, subject: f.s.value, message: f.m.value, createdAt: serverTimestamp(), reply: '' }); route(); }; },
   admin() {
     const act = fn => async e => { try { await fn(e); route(); } catch (x) { alert(err(x)); } };
-    app.querySelectorAll('[data-w]').forEach(b => b.onclick = act(() => call('adminDecideWithdrawal')({ id: b.dataset.w, decision: b.dataset.d, note: prompt('Note (optional, e.g. M-Pesa code)') || '' })));
+    app.querySelectorAll('[data-w]').forEach(b => b.onclick = act(() => call('adminDecideWithdrawal')({ id: b.dataset.w, decision: b.dataset.d, note: b.dataset.d === 'mpesa' ? '' : (prompt('Note (optional, e.g. M-Pesa code)') || '') })));
     app.querySelectorAll('[data-st]').forEach(b => b.onclick = act(() => call('adminSetUserStatus')({ uid: b.dataset.uid, status: b.dataset.st })));
     app.querySelectorAll('[data-c]').forEach(b => b.onclick = act(() => updateDoc(doc(db, 'campaigns', b.dataset.c), { active: b.dataset.on === 'true' })));
     app.querySelectorAll('.rf').forEach(f => f.onsubmit = act(e => { e.preventDefault(); return updateDoc(doc(db, 'tickets', f.dataset.t), { reply: f.r.value }); }));

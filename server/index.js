@@ -32,7 +32,7 @@ const ledger = (t, e) => t.set(db.collection('ledger').doc(), { ...e, createdAt:
 
 // Fraud #6: one phone per account; same device on another account => flagged
 api('registerProfile', async ({ auth, data }) => {
-  const uid = uidOf({ auth }); const { name, phone, deviceId } = data;
+  const uid = uidOf({ auth }); const { name, deviceId } = data; let phone = String(data.phone || '').replace(/\s+/g, '').replace(/^\+/, ''); if (phone.startsWith('0')) phone = '254' + phone.slice(1);
   if (!/^2547\d{8}$|^2541\d{8}$/.test(phone || '')) throw new HttpsError('invalid-argument', 'Phone must look like 2547XXXXXXXX.');
   if (!deviceId || !name) throw new HttpsError('invalid-argument', 'Missing details.');
   const ref = db.doc('users/' + uid); if ((await ref.get()).exists) return { ok: true };
@@ -118,12 +118,48 @@ api('requestWithdrawal', async ({ auth, data }) => {
   return { ok: true };
 });
 
-// Admin pays via M-Pesa (manual or add Daraja B2C here), then marks paid; reject refunds the balance.
+// ---------- M-Pesa B2C (Daraja), adapted from your EarnHub starter ----------
+const E = process.env;
+const darajaBase = () => E.MPESA_ENV === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
+const mpesaReady = () => ['MPESA_CONSUMER_KEY', 'MPESA_CONSUMER_SECRET', 'MPESA_SECURITY_CREDENTIAL', 'MPESA_SHORTCODE', 'MPESA_INITIATOR_NAME', 'PUBLIC_URL', 'CALLBACK_TOKEN'].every(k => E[k]);
+async function darajaToken() {
+  const raw = Buffer.from(`${E.MPESA_CONSUMER_KEY}:${E.MPESA_CONSUMER_SECRET}`).toString('base64');
+  const r = await fetch(`${darajaBase()}/oauth/v1/generate?grant_type=client_credentials`, { headers: { Authorization: `Basic ${raw}` } });
+  const d = await r.json(); if (!r.ok || !d.access_token) throw new Error('Daraja auth failed');
+  return d.access_token;
+}
+// decision: 'mpesa' (send via B2C) | 'paid' (you already paid manually) | 'rejected' (refund balance)
+// Statuses: pending > submitting > submitted > paid | failed(refunded) | needs_review (timeout: reconcile manually, NO auto refund)
 api('adminDecideWithdrawal', async ({ auth, data }) => {
-  adminOnly({ auth }); const { id, decision, note = '' } = data;
+  adminOnly({ auth }); const { id, decision, note = '' } = data; const wRef = db.doc('withdrawals/' + id);
+  if (decision === 'mpesa') {
+    if (!mpesaReady()) throw new HttpsError('failed-precondition', 'M-Pesa is not configured on the server (see README).');
+    await db.runTransaction(async t => {   // lock first so it can never be sent twice
+      const w = (await t.get(wRef)).data();
+      if (!w || !['pending', 'submission_failed'].includes(w.status)) throw new HttpsError('failed-precondition', 'This request cannot be sent (already handled or needs manual review).');
+      t.update(wRef, { status: 'submitting', approvedBy: auth.uid, updatedAt: FV.serverTimestamp() });
+    });
+    const w = (await wRef.get()).data();
+    try {
+      const r = await fetch(`${darajaBase()}/mpesa/b2c/v1/paymentrequest`, { method: 'POST',
+        headers: { Authorization: 'Bearer ' + await darajaToken(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ InitiatorName: E.MPESA_INITIATOR_NAME, SecurityCredential: E.MPESA_SECURITY_CREDENTIAL, CommandID: 'BusinessPayment',
+          Amount: w.amount, PartyA: E.MPESA_SHORTCODE, PartyB: w.phone, Remarks: 'RewardHub reward', Occasion: 'RH-' + id.slice(0, 10),
+          QueueTimeOutURL: `${E.PUBLIC_URL}/mpesa/timeout?token=${E.CALLBACK_TOKEN}`, ResultURL: `${E.PUBLIC_URL}/mpesa/result?token=${E.CALLBACK_TOKEN}` }) });
+      const d = await r.json();
+      if (!r.ok || String(d.ResponseCode) !== '0') { await wRef.update({ status: 'submission_failed', darajaResponse: d, updatedAt: FV.serverTimestamp() }); throw new HttpsError('failed-precondition', 'Daraja rejected the request. You can retry or reject.'); }
+      await wRef.update({ status: 'submitted', originatorConversationId: d.OriginatorConversationID || null, conversationId: d.ConversationID || null, updatedAt: FV.serverTimestamp() });
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof HttpsError) throw e; console.error(e);
+      await wRef.update({ status: 'submission_error', updatedAt: FV.serverTimestamp() });
+      throw new HttpsError('internal', 'Unclear if money was sent. Check the Daraja portal before doing anything else.');
+    }
+  }
+  if (!['paid', 'rejected'].includes(decision)) throw new HttpsError('invalid-argument', 'Bad decision');
   await db.runTransaction(async t => {
-    const wRef = db.doc('withdrawals/' + id); const w = (await t.get(wRef)).data();
-    if (!w || w.status !== 'pending') throw new HttpsError('failed-precondition', 'Already handled.');
+    const w = (await t.get(wRef)).data();
+    if (!w || !['pending', 'submission_failed', 'submission_error', 'needs_review'].includes(w.status)) throw new HttpsError('failed-precondition', 'Already handled or still processing.');
     if (decision === 'paid') t.update(wRef, { status: 'paid', note, decidedAt: FV.serverTimestamp() });
     else {
       t.update(wRef, { status: 'rejected', note, decidedAt: FV.serverTimestamp() });
@@ -132,6 +168,33 @@ api('adminDecideWithdrawal', async ({ auth, data }) => {
     }
   });
   return { ok: true };
+});
+
+const sameToken = q => { const a = Buffer.from(String(q || '')), b = Buffer.from(E.CALLBACK_TOKEN || ''); return b.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b); };
+app.post('/mpesa/:kind', async (req, res) => {
+  const kind = req.params.kind;
+  if (!['result', 'timeout'].includes(kind) || !sameToken(req.query.token)) return res.status(403).send('Forbidden');
+  try {
+    const r = req.body?.Result; if (!r) throw new Error('No Result');
+    const q = await db.collection('withdrawals').where('originatorConversationId', '==', r.OriginatorConversationID).limit(1).get();
+    if (q.empty) { console.warn('Unmatched B2C callback', r.OriginatorConversationID); return res.json({ ResultCode: 0, ResultDesc: 'Accepted' }); }
+    const wRef = q.docs[0].ref, cbRef = db.doc(`mpesaCallbacks/${kind}_${r.OriginatorConversationID}`), code = Number(r.ResultCode);
+    await db.runTransaction(async t => {
+      const [wS, cS] = await Promise.all([t.get(wRef), t.get(cbRef)]); if (cS.exists) return;   // duplicate callback
+      const w = wS.data(); t.create(cbRef, { withdrawalId: wRef.id, kind, code, createdAt: FV.serverTimestamp() });
+      if (['paid', 'failed', 'rejected'].includes(w.status)) return;
+      if (kind === 'timeout') { if (w.status === 'submitted') t.update(wRef, { status: 'needs_review', updatedAt: FV.serverTimestamp() }); return; }  // ambiguous: never auto-refund
+      if (code === 0) {
+        const rec = (r.ResultParameters?.ResultParameter || []).find(x => x.Key === 'TransactionReceipt' || x.Key === 'ReceiptNo');
+        t.update(wRef, { status: 'paid', mpesaReceipt: rec?.Value || null, resultDesc: r.ResultDesc || '', decidedAt: FV.serverTimestamp() });
+      } else {
+        t.update(wRef, { status: 'failed', resultCode: code, resultDesc: r.ResultDesc || '', decidedAt: FV.serverTimestamp() });
+        t.update(db.doc('users/' + w.uid), { approved: FV.increment(w.amount) });
+        ledger(t, { uid: w.uid, type: 'withdraw_refund', amount: w.amount, reward: 0, payout: 0, withdrawalId: wRef.id });
+      }
+    });
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  } catch (e) { console.error('B2C callback failed', e); res.status(500).json({ ResultCode: 1, ResultDesc: 'Processing failed' }); }
 });
 
 api('adminSetUserStatus', async ({ auth, data }) => {
