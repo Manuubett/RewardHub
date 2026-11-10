@@ -1,0 +1,33 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>RewardHub</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#F2F6F4;--ink:#10231F;--teal:#0B3B36;--sun:#F2A900;--line:#D3DDD9;--card:#fff;--bad:#B3261E;--ok:#1B7A4B;--mute:#5B6B66}
+@media(prefers-color-scheme:dark){:root{--bg:#0C1614;--ink:#E6F0ED;--teal:#8FD3C4;--line:#24373300;--card:#142320;--line:#263A36;--mute:#93A8A2;--bad:#FF8A80;--ok:#6FD9A0}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 'Bricolage Grotesque',system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:.5rem 1.2rem;align-items:center;padding:.8rem 1.2rem;border-bottom:1px solid var(--line)}
+header b{font-size:1.3rem;font-weight:800;color:var(--teal);margin-right:auto}
+nav{display:flex;flex-wrap:wrap;gap:.2rem}nav a{color:var(--ink);text-decoration:none;padding:.3rem .7rem;border-radius:6px}
+nav a.on{background:var(--teal);color:var(--bg)}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--sun);outline-offset:2px}
+main{max-width:980px;margin:0 auto;padding:1.5rem 1.2rem 4rem}
+h1{font-size:clamp(2rem,6vw,3.6rem);line-height:1.05;margin:.2em 0;font-weight:800;letter-spacing:-.02em}h2{font-size:1.35rem;margin:1.8rem 0 .6rem}
+.hero{padding:2rem 0}.hero p{max-width:56ch;font-size:1.15rem;color:var(--mute)}
+.grid{display:grid;gap:.9rem;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem}
+.big{font-size:2rem;font-weight:800;color:var(--teal)}.mute{color:var(--mute);font-size:.92rem}
+button,.btn{background:var(--teal);color:var(--bg);border:0;border-radius:8px;padding:.6rem 1.1rem;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+button.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}button.bad{background:var(--bad);color:#fff}
+.gold{background:var(--sun);color:#10231F}
+input,select,textarea{width:100%;padding:.6rem;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font:inherit;margin:.25rem 0 .8rem}
+label{font-weight:600;font-size:.92rem}form{max-width:420px}.wide{max-width:none}
+table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:.5rem;border-bottom:1px solid var(--line)}
+.scroll{overflow-x:auto}.tag{padding:.1rem .5rem;border-radius:99px;border:1px solid var(--line);font-size:.8rem}
+.pending{color:var(--sun)}.approved,.paid,.active{color:var(--ok)}.reversed,.rejected,.suspended,.flagged{color:var(--bad)}
+.msg{padding:.7rem 1rem;border-radius:8px;margin:.8rem 0;background:var(--card);border-left:4px solid var(--sun)}
+.steps{counter-reset:s;list-style:none;padding:0;display:grid;gap:.9rem;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.steps li{counter-increment:s;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem}
+.steps li:before{content:counter(s);display:block;font-size:1.8rem;font-weight:800;color:var(--sun)}
+</style></head><body>
+<header><b>RewardHub</b><nav id="nav"></nav></header>
+<main id="app">Loading…</main>
+<script type="module" src="app.js"></script></body></html>

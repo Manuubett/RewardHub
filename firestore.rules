@@ -1,0 +1,23 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{d}/documents {
+    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+    function mine() { return request.auth != null && request.auth.uid == resource.data.uid; }
+    // Money-bearing collections are written ONLY by Cloud Functions (Admin SDK bypasses rules).
+    match /users/{u}        { allow read: if (request.auth != null && request.auth.uid == u) || isAdmin(); }
+    match /tasks/{t}        { allow read: if mine() || isAdmin(); }
+    match /ledger/{l}       { allow read: if mine() || isAdmin(); }
+    match /withdrawals/{w}  { allow read: if mine() || isAdmin(); }
+    match /postbacks/{p}    { allow read: if isAdmin(); }
+    match /campaigns/{c}    { allow read: if request.auth != null; allow write: if isAdmin(); }
+    match /campaignCosts/{c}   { allow read, write: if isAdmin(); }
+    match /partners/{p}        { allow read, write: if isAdmin(); }
+    match /partnerPayments/{p} { allow read, write: if isAdmin(); }
+    match /tickets/{t} {
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.keys().hasOnly(['uid','subject','message','createdAt','reply']);
+      allow read: if mine() || isAdmin();
+      allow update: if isAdmin();
+    }
+  }
+}
