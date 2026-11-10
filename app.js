@@ -6,7 +6,7 @@ const $ = s => document.querySelector(s), app = $('#app');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const kes = n => 'KES ' + Number(n || 0).toLocaleString();
 const call = n => async d => {
-  const r = await fetch(API_URL + '/api/' + n, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await auth.currentUser.getIdToken() }, body: JSON.stringify(d || {}) });
+  const r = await fetch(API_URL.replace(/\/+$/, '') + '/api/' + n, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await auth.currentUser.getIdToken() }, body: JSON.stringify(d || {}) });
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Could not reach the server.'); return j;
 };
 const when = t => t?.toDate ? t.toDate().toLocaleString() : '';
