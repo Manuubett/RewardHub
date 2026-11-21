@@ -19,7 +19,7 @@ module.exports = function registerPoints({ app, api, db, admin, HttpsError, uidO
 
   // ---------- Opportunities (admin) ----------
   api('adminSeedOpportunities', async ({ auth }) => {
-    adminOnly({ auth });
+    await adminOnly({ auth });
     const refs = Array.from({ length: OPP_COUNT }, (_, i) => db.doc('opportunities/' + codeOf(i + 1)));
     const snaps = await db.getAll(...refs); const batch = db.batch(); let made = 0;
     snaps.forEach((s, i) => {
@@ -49,7 +49,7 @@ module.exports = function registerPoints({ app, api, db, admin, HttpsError, uidO
   };
 
   api('adminUpdateOpportunity', async ({ auth, data }) => {
-    adminOnly({ auth });
+    await adminOnly({ auth });
     const id = String(data.id || ''); if (!CODE_RE.test(id)) throw new HttpsError('invalid-argument', 'Bad opportunity code.');
     const f = {
       title: str(data.title, 80, 'Title', true), provider: str(data.provider, 60, 'Provider'),
@@ -152,7 +152,7 @@ module.exports = function registerPoints({ app, api, db, admin, HttpsError, uidO
   // approve: credits points exactly once (the attempt must still be started / pending_review).
   // reject: records the decision and the reason; no points are credited.
   api('adminReviewActivity', async ({ auth, data }) => {
-    adminOnly({ auth });
+    await adminOnly({ auth });
     const { attemptId, decision } = data; const note = String(data.note || '').trim().slice(0, 500);
     if (!['approve', 'reject'].includes(decision)) throw new HttpsError('invalid-argument', 'Bad decision.');
     if (!attemptId) throw new HttpsError('invalid-argument', 'Missing activity.');

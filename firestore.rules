@@ -1,10 +1,15 @@
 rules_version = '2';
 service cloud.firestore {
-  match /databases/{d}/documents {
-    // ONE admin model everywhere: the Firebase custom claim `admin: true`
-    // (set with `node setAdmin.js you@email.com`). The server checks the same claim.
-    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+  match /databases/{database}/documents {
+    // Admin = the custom claim `admin: true` OR a document at admins/{uid} (create it in the Firebase console).
+    function isAdmin() {
+      return request.auth != null && (request.auth.token.admin == true
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
     function mine() { return request.auth != null && request.auth.uid == resource.data.uid; }
+
+    // A signed-in user may only check whether THEIR OWN admin document exists. Nobody can write it from the website.
+    match /admins/{u}       { allow get: if request.auth != null && request.auth.uid == u; }
 
     // Balances, ledgers, attempts and cooldowns are written ONLY by the Node server (Admin SDK bypasses these rules).
     match /users/{u}        { allow read: if (request.auth != null && request.auth.uid == u) || isAdmin(); }

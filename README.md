@@ -9,7 +9,7 @@ Users open **20 sponsored opportunities (BTN001–BTN020)**, earn **points** aft
 ## What changed from RewardHub
 | Area | Now |
 |---|---|
-| Admin check | One model everywhere: Firebase custom claim `admin: true` (website, server, Firestore rules). The old `admins/{uid}` document is no longer used. |
+| Admin check | Same rule in the website, server and Firestore rules: you are an admin if you have a document at `admins/{your-uid}` **or** the Firebase custom claim `admin: true`. |
 | Points | New collections `opportunities`, `activityAttempts`, `cooldowns`, `pointLedger`, `providerEvents`, `adminAudit`. Points are separate from the old KES balances. |
 | Cooldown | Per opportunity, enforced by the server in a Firestore transaction. The browser only displays the countdown. |
 | Backend | `server/index.js` (existing) + `server/points.js` (new). The root `index.js` now just points to `server/index.js`. |
@@ -34,9 +34,10 @@ The site is on GitHub Pages (https), so the server must also be **https** (Rende
 Upload the `server` folder, set `ALLOWED_ORIGINS` and `SERVICE_ACCOUNT_JSON`, start command `npm start`, then set `API_URL` in `firebase-config.js`.
 If your host starts from the repository root instead, that also works: the root `index.js` loads `server/index.js`.
 
-## 4. Make yourself admin (required again after this update)
-Register on the site, then in `server/`: `node setAdmin.js you@email.com`. **Log out and in**; the Admin tab appears.
-Anyone who was admin before only via an `admins/{uid}` document must run this too.
+## 4. Make yourself admin
+Register on the site, then in the Firebase console: Firestore Database > **Start collection** `admins` > Document ID = **your user UID** (Authentication > Users > copy the UID) > add any field, e.g. `role` = `admin` > Save. **Log out and in**; the Admin tab appears.
+Only the document's existence matters, not its fields. Nobody can create it from the website; only you in the console.
+Alternative if you can run Node: in `server/` run `node setAdmin.js you@email.com` to grant the custom claim instead (either method is enough).
 
 ## 5. Set up the 20 opportunities
 1. Admin > scroll to **Opportunities** > click **Create the missing BTN001–BTN020 entries**. They are created **paused** with placeholder text.

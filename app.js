@@ -33,8 +33,9 @@ let user = null, profile = null, isAdmin = false, unsub = null;
 onAuthStateChanged(auth, async u => {
   user = u; unsub?.(); profile = null; isAdmin = false;
   if (u) {
-    // One admin model everywhere: the Firebase custom claim `admin: true` (same check as the server and Firestore rules).
-    isAdmin = await u.getIdTokenResult(true).then(t => t.claims.admin === true, () => false);
+    // Admin = custom claim `admin: true` OR a document at admins/{uid} (same rule as the server and Firestore rules).
+    isAdmin = await u.getIdTokenResult(true).then(t => t.claims.admin === true, () => false)
+      || await getDoc(doc(db, 'admins', u.uid)).then(d => d.exists(), () => false);
     unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|support|admin|task|opportunity/.test(location.hash)) route(); }, () => {});
   }
   route();
