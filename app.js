@@ -177,7 +177,7 @@ const pages = {
     <h2>Your messages</h2>${k.map(x => `<div class="card"><b>${esc(x.subject)}</b><p>${esc(x.message)}</p>${x.reply ? `<p class="msg">Support: ${esc(x.reply)}</p>` : '<span class="mute">Awaiting reply</span>'}</div>`).join('') || '<p class="mute">No messages yet.</p>'}`;
   },
 
-  admin: async () => {
+  admin: async (tab = 'overview') => {
     if (!isAdmin) return note('Admins only.');
     const [users, wd, led, partners, pays, camps, tix] = await Promise.all(['users', 'withdrawals', 'ledger', 'partners', 'partnerPayments', 'campaigns', 'tickets'].map(c => rows(collection(db, c))));
     const now = Date.now() / 1e3, prof = d => led.filter(x => x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.payout || 0) - (x.reward || 0), 0);
@@ -220,50 +220,56 @@ const pages = {
     const uf = id => users.find(u => u.id === id) || {}, local = ph => String(ph || '').replace(/^254/, '0');
     const toPay = wd.filter(w => OPEN.includes(w.status)).sort((a, b) => byDate(b, a)), done = wd.filter(w => !OPEN.includes(w.status)).sort(byDate);
     const payCard = w => { const u = uf(w.uid), how = [w.pointsDeducted ? pts(w.pointsDeducted) : '', w.cashDeducted ? kes(w.cashDeducted) + ' cash balance' : ''].filter(Boolean).join(' + ');
-      return `<div class="card"><div style="display:flex;flex-wrap:wrap;gap:1rem;justify-content:space-between"><div>
+      return `<div class="card"><div class="paycard"><div>
       <b>${esc(w.name || u.name)}</b> <span class="tag ${esc(w.status)}">${esc(w.status)}</span><br>
       M-Pesa number: <b>${esc(local(w.phone))}</b> <span class="mute">(${esc(w.phone)})</span> <button type="button" class="alt" data-copy="${esc(w.phone)}">Copy</button><br>
       <span class="mute">Requested ${when(w.createdAt)} · Account: ${esc(u.status || 'unknown')}${u.flags?.length ? ' · ⚠ ' + esc(u.flags.join(', ')) : ''}</span></div>
       <div><div class="big">${kes(w.amount)}</div><div class="mute">${how ? 'Deducted: ' + how : ''}</div></div></div>
       ${['submission_error', 'needs_review'].includes(w.status) ? note('This may already have been sent through M-Pesa. Check your M-Pesa statement before paying again.') : ''}
       <p><button data-w="${w.id}" data-d="paid">Mark as paid</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject &amp; refund</button></p></div>`; };
-    const pointsHtml = `<h2>Points report</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${ptsVal(sum('pendingPoints'))}</div></div>
+    const attention = [['Payments to make', toPay.length, 'payments'], ['Awaiting review', queue.length, 'review'], ['Open support tickets', tix.filter(t => !t.reply).length, 'support']];
+    const S = {};
+    S.overview = `<h1>Overview</h1><div class="grid">${attention.map(([l, n, k]) => `<a class="card" href="#/admin/${k}"><div class="mute">${l}</div><div class="big">${n}</div></a>`).join('')}</div>
+      <h2>Points</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${ptsVal(sum('pendingPoints'))}</div></div>
       <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${ptsVal(sum('approvedPoints'))}</div></div>
       <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${ptsVal(apprSince(7))}</div></div>
       <div class="card"><div class="mute">Approved in last 30 days</div><div class="big">${ptsVal(apprSince(30))}</div></div></div>
-      <p class="mute">Rate: ${PTS_PER_KES} points = KES 1. Opportunity counts below come from SemaAfrica's own records (latest 200 activities), not from provider reports.</p>
-      <h2>Awaiting review (provider confirmed)</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Provider event</th><th>Note</th><th></th></tr>
+      <p class="mute">Rate: ${PTS_PER_KES} points = KES 1. Counts come from SemaAfrica's own records (latest 200 activities), not from provider reports.</p>
+      <h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
+      <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
+      <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>`;
+    S.review = `<h1>Review</h1><h2>Awaiting review (provider confirmed)</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Provider event</th><th>Note</th><th></th></tr>
       ${queue.map(a => arow(a, false)).join('') || '<tr><td colspan=8>Nothing waiting.</td></tr>'}</table></div>
       <h2>Recent activity</h2><p class="mute">"Started" means no provider confirmation yet. Approve those only with real evidence and write what you checked in the note.</p>
       <div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Status</th><th>Provider event</th><th>Note</th><th></th></tr>
-      ${atts.slice(0, 100).map(a => arow(a, true)).join('') || '<tr><td colspan=9>No activity yet.</td></tr>'}</table></div>
-      <h2>Opportunities (BTN001–BTN020)</h2>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
+      ${atts.slice(0, 100).map(a => arow(a, true)).join('') || '<tr><td colspan=9>No activity yet.</td></tr>'}</table></div>`;
+    S.payments = `<h1>Payments</h1><h2>Payments to make (${toPay.length})</h2><p class="mute">Send the money manually from M-Pesa to the number shown, then press <b>Mark as paid</b> and enter the M-Pesa confirmation code. Reject refunds the user's balance.</p>
+      ${toPay.map(payCard).join('') || '<p class="mute">No payment requests waiting.</p>'}
+      <h2>Payment history</h2><div class="scroll"><table><tr><th>Requested</th><th>Name</th><th>M-Pesa number</th><th>Amount</th><th>Status</th><th>M-Pesa code / note</th></tr>
+      ${done.map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(local(w.phone))}</td><td>${kes(w.amount)}</td><td class="${esc(w.status)}">${esc(w.status)}</td><td>${esc(w.mpesaReceipt || w.note || '')}</td></tr>`).join('') || '<tr><td colspan=6>None yet.</td></tr>'}</table></div>`;
+    S.opportunities = `<h1>Opportunities</h1><p class="mute">BTN001–BTN020. Tap one to edit it.</p>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
       ${opps.map(oppForm).join('')}`;
-    return `<h1>Admin</h1>${pointsHtml}<h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
-    <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
-    <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>
-    <h2>Payments to make (${toPay.length})</h2><p class="mute">Send the money manually from M-Pesa to the number shown, then press <b>Mark as paid</b> and enter the M-Pesa confirmation code. Reject refunds the user's balance.</p>
-    ${toPay.map(payCard).join('') || '<p class="mute">No payment requests waiting.</p>'}
-    <h2>Payment history</h2><div class="scroll"><table><tr><th>Requested</th><th>Name</th><th>M-Pesa number</th><th>Amount</th><th>Status</th><th>M-Pesa code / note</th></tr>
-    ${done.map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(local(w.phone))}</td><td>${kes(w.amount)}</td><td class="${esc(w.status)}">${esc(w.status)}</td><td>${esc(w.mpesaReceipt || w.note || '')}</td></tr>`).join('') || '<tr><td colspan=6>None yet.</td></tr>'}</table></div>
-    <h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
-    ${sus.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${u.status}">${u.status}</td><td>${esc((u.flags || []).join(', '))}</td><td>${ub(u, 'suspended', 'Suspend')} ${ub(u, 'active', 'Clear')}</td></tr>`).join('') || '<tr><td colspan=5>Nothing flagged.</td></tr>'}</table></div>
-    <h2>Advertising partners</h2><form id="pf" class="wide" style="display:flex;gap:.5rem"><input name="n" placeholder="Partner name" required><button>Add partner</button></form>
-    <div class="scroll"><table><tr><th>Partner</th><th>ID</th><th>Secret (give to partner)</th><th>Owed</th><th>Paid</th><th>Balance</th></tr>
-    ${partners.map(p => `<tr><td>${esc(p.name)}</td><td>${p.id}</td><td>${esc(p.secret)}</td><td>${kes(owed(p.id))}</td><td>${kes(paid(p.id))}</td><td>${kes(paid(p.id) - owed(p.id))}</td></tr>`).join('')}</table></div>
-    <h2>Advertiser payments</h2><form id="payf" style="max-width:520px"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
-    <input name="a" type="number" min="1" placeholder="Amount received (KES)" required><input name="r" placeholder="Reference (bank / M-Pesa code)"><button>Record payment</button></form>
-    <h2>Campaigns</h2><form id="cf" style="max-width:520px"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
-    <input name="t" placeholder="Title" required><input name="u" type="url" placeholder="Partner tracking URL (https://…)" required>
-    <input name="rw" type="number" min="1" placeholder="User reward (KES)" required><input name="po" type="number" min="1" placeholder="Advertiser pays you (KES)" required>
-    <select name="ty"><option value="conversion">Pays on completed action</option><option value="cpc">Pays for valid click (partner-confirmed)</option></select>
-    <textarea name="q" rows="3" placeholder="Requirements shown to users" required></textarea><button>Add campaign</button></form>
-    <div class="scroll"><table><tr><th>Title</th><th>Partner</th><th>Reward</th><th>Active</th><th></th></tr>
-    ${camps.map(c => `<tr><td>${esc(c.title)}</td><td>${pn(c.partnerId)}</td><td>${kes(c.reward)}</td><td>${c.active}</td><td><button class="alt" data-c="${c.id}" data-on="${!c.active}">${c.active ? 'Pause' : 'Resume'}</button></td></tr>`).join('')}</table></div>
-    <h2>Users (${users.length})</h2><div class="scroll"><table><tr><th>Name</th><th>Phone</th><th>Status</th><th>Pending</th><th>Approved</th><th>Earned</th></tr>
-    ${users.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${u.status}">${u.status}</td><td>${kes(u.pending)}</td><td>${kes(u.approved)}</td><td>${kes(u.totalEarned)}</td></tr>`).join('')}</table></div>
-    <h2>Support tickets</h2>${tix.sort(byDate).map(t => `<div class="card"><b>${esc(t.subject)}</b> <span class="mute">${esc(users.find(u => u.id === t.uid)?.name)}</span><p>${esc(t.message)}</p>
-    <form class="wide rf" data-t="${t.id}" style="display:flex;gap:.5rem"><input name="r" value="${esc(t.reply || '')}" placeholder="Reply"><button>Reply</button></form></div>`).join('')}`;
+    S.users = `<h1>Users</h1><h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
+      ${sus.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${esc(u.status)}">${esc(u.status)}</td><td>${esc((u.flags || []).join(', '))}</td><td>${ub(u, 'suspended', 'Suspend')} ${ub(u, 'active', 'Clear')}</td></tr>`).join('') || '<tr><td colspan=5>Nothing flagged.</td></tr>'}</table></div>
+      <h2>All users (${users.length})</h2><div class="scroll"><table><tr><th>Name</th><th>Phone</th><th>Status</th><th>Pending pts</th><th>Approved pts</th><th>Cash pending</th><th>Cash approved</th></tr>
+      ${users.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${esc(u.status)}">${esc(u.status)}</td><td>${pts(u.pendingPoints)}</td><td>${pts(u.approvedPoints)}</td><td>${kes(u.pending)}</td><td>${kes(u.approved)}</td></tr>`).join('')}</table></div>`;
+    S.partners = `<h1>Partners</h1><h2>Advertising partners</h2><form id="pf" class="wide row"><input name="n" placeholder="Partner name" required><button>Add partner</button></form>
+      <div class="scroll"><table><tr><th>Partner</th><th>ID</th><th>Secret (give to partner)</th><th>Owed</th><th>Paid</th><th>Balance</th></tr>
+      ${partners.map(p => `<tr><td>${esc(p.name)}</td><td>${p.id}</td><td>${esc(p.secret)}</td><td>${kes(owed(p.id))}</td><td>${kes(paid(p.id))}</td><td>${kes(paid(p.id) - owed(p.id))}</td></tr>`).join('') || '<tr><td colspan=6>No partners yet.</td></tr>'}</table></div>
+      <h2>Record advertiser payment</h2><form id="payf"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <input name="a" type="number" min="1" placeholder="Amount received (KES)" required><input name="r" placeholder="Reference (bank / M-Pesa code)"><button>Record payment</button></form>`;
+    S.campaigns = `<h1>Campaigns</h1><h2>Add campaign</h2><form id="cf" style="max-width:520px"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <input name="t" placeholder="Title" required><input name="u" type="url" placeholder="Partner tracking URL (https://…)" required>
+      <input name="rw" type="number" min="1" placeholder="User reward (KES)" required><input name="po" type="number" min="1" placeholder="Advertiser pays you (KES)" required>
+      <select name="ty"><option value="conversion">Pays on completed action</option><option value="cpc">Pays for valid click (partner-confirmed)</option></select>
+      <textarea name="q" rows="3" placeholder="Requirements shown to users" required></textarea><button>Add campaign</button></form>
+      <h2>All campaigns</h2><div class="scroll"><table><tr><th>Title</th><th>Partner</th><th>Reward</th><th>Active</th><th></th></tr>
+      ${camps.map(c => `<tr><td>${esc(c.title)}</td><td>${pn(c.partnerId)}</td><td>${kes(c.reward)}</td><td>${c.active}</td><td><button class="alt" data-c="${c.id}" data-on="${!c.active}">${c.active ? 'Pause' : 'Resume'}</button></td></tr>`).join('') || '<tr><td colspan=5>No campaigns yet.</td></tr>'}</table></div>`;
+    S.support = `<h1>Support tickets</h1>${tix.sort(byDate).map(t => `<div class="card" style="margin:.7rem 0"><b>${esc(t.subject)}</b> <span class="mute">${esc(users.find(u => u.id === t.uid)?.name)}</span><p>${esc(t.message)}</p>
+      <form class="wide rf row" data-t="${t.id}"><input name="r" value="${esc(t.reply || '')}" placeholder="Reply"><button>Reply</button></form></div>`).join('') || '<p class="mute">No tickets.</p>'}`;
+    const tabs = [['overview', 'Overview', 0], ['review', 'Review', queue.length], ['payments', 'Payments', toPay.length], ['opportunities', 'Opportunities', 0], ['users', 'Users', sus.length], ['partners', 'Partners', 0], ['campaigns', 'Campaigns', 0], ['support', 'Support', attention[2][1]]];
+    const cur = S[tab] ? tab : 'overview';
+    return `<div class="admin"><aside class="side"><div class="side-h">Admin</div><nav>${tabs.map(([k, l, n]) => `<a href="#/admin/${k}" class="${k === cur ? 'on' : ''}">${l}${n ? `<span class="badge">${n}</span>` : ''}</a>`).join('')}</nav></aside><section class="panel">${S[cur]}</section></div>`;
   }
 };
 
@@ -310,6 +316,7 @@ const bind = {
   support() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); await addDoc(collection(db, 'tickets'), { uid: user.uid, subject: f.s.value, message: f.m.value, createdAt: serverTimestamp(), reply: '' }); route(); }; },
   admin() {
     if (!isAdmin) return;   // page shows 'Admins only.'; nothing to bind
+    const F = id => $(id) || {};   // forms exist only on some tabs
     const act = fn => async e => { try { await fn(e); route(); } catch (x) { alert(err(x)); } };
     $('#seed')?.addEventListener('click', act(() => call('adminSeedOpportunities')()));
     app.querySelectorAll('[data-ra]').forEach(b => b.onclick = act(() => {
@@ -329,8 +336,8 @@ const bind = {
     app.querySelectorAll('[data-st]').forEach(b => b.onclick = act(() => call('adminSetUserStatus')({ uid: b.dataset.uid, status: b.dataset.st })));
     app.querySelectorAll('[data-c]').forEach(b => b.onclick = act(() => updateDoc(doc(db, 'campaigns', b.dataset.c), { active: b.dataset.on === 'true' })));
     app.querySelectorAll('.rf').forEach(f => f.onsubmit = act(e => { e.preventDefault(); return updateDoc(doc(db, 'tickets', f.dataset.t), { reply: f.r.value }); }));
-    $('#pf').onsubmit = act(e => { e.preventDefault(); const s = [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join(''); return addDoc(collection(db, 'partners'), { name: e.target.n.value, secret: s, createdAt: serverTimestamp() }); });
-    $('#payf').onsubmit = act(e => { e.preventDefault(); const f = e.target; return addDoc(collection(db, 'partnerPayments'), { partnerId: f.p.value, amount: +f.a.value, ref: f.r.value, createdAt: serverTimestamp() }); });
-    $('#cf').onsubmit = act(async e => { e.preventDefault(); const f = e.target; const r = await addDoc(collection(db, 'campaigns'), { partnerId: f.p.value, title: f.t.value, url: f.u.value, reward: +f.rw.value, type: f.ty.value, requirements: f.q.value, active: true, createdAt: serverTimestamp() }); await setDoc(doc(db, 'campaignCosts', r.id), { payout: +f.po.value }); });
+    F('#pf').onsubmit = act(e => { e.preventDefault(); const s = [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join(''); return addDoc(collection(db, 'partners'), { name: e.target.n.value, secret: s, createdAt: serverTimestamp() }); });
+    F('#payf').onsubmit = act(e => { e.preventDefault(); const f = e.target; return addDoc(collection(db, 'partnerPayments'), { partnerId: f.p.value, amount: +f.a.value, ref: f.r.value, createdAt: serverTimestamp() }); });
+    F('#cf').onsubmit = act(async e => { e.preventDefault(); const f = e.target; const r = await addDoc(collection(db, 'campaigns'), { partnerId: f.p.value, title: f.t.value, url: f.u.value, reward: +f.rw.value, type: f.ty.value, requirements: f.q.value, active: true, createdAt: serverTimestamp() }); await setDoc(doc(db, 'campaignCosts', r.id), { payout: +f.po.value }); });
   }
 };
