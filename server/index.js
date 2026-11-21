@@ -8,12 +8,12 @@ catch (e) { console.error('No Firebase key found. On Render set the SERVICE_ACCO
 admin.initializeApp({ credential: admin.credential.cert(key) });
 const db = admin.firestore(); const FV = admin.firestore.FieldValue;
 
-const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, 'resource-exhausted': 429 };
+const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, 'resource-exhausted': 429, 'invalid-argument': 400, 'failed-precondition': 412, internal: 500 };
 class HttpsError extends Error { constructor(code, msg, extra) { super(msg); this.status = STATUS[code] || 400; this.extra = extra; } }
 
 const app = express(); app.set('trust proxy', 1);
 app.use((req, _res, next) => { req.url = req.url.replace(/\/{2,}/g, '/'); next(); });   // tolerate // in URLs
- app.use(express.json({ limit: '20kb' }));
+app.use(express.json({ limit: '20kb' }));
 const origins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 app.use(cors({ origin: origins.length ? origins : false }));
 app.use(rateLimit({ windowMs: 60e3, max: 60 }));          // basic abuse limit per IP
@@ -25,13 +25,14 @@ const api = (name, fn) => app.post('/api/' + name, async (req, res) => {
     const tok = await admin.auth().verifyIdToken(h.slice(7));
     res.json(await fn({ auth: { uid: tok.uid, token: tok }, data: req.body || {} }));
   } catch (e) {
-    if (!(e instanceof HttpsError)) { console.error(e); e = e.code?.startsWith?.('auth/') ? new HttpsError('unauthenticated', 'Session expired. Log in again.') : new HttpsError('internal', 'Server error'); e.status = e.status === 400 ? 500 : e.status; }
+    if (!(e instanceof HttpsError)) { console.error(e); e = e.code?.startsWith?.('auth/') ? new HttpsError('unauthenticated', 'Session expired. Log in again.') : new HttpsError('internal', 'Server error'); }
     res.status(e.status).json({ error: e.message, ...(e.extra || {}) });
   }
 });
 app.get('/health', (_, r) => r.send('ok'));
 
-const MIN_WITHDRAW = 100;
+const MIN_WITHDRAW = 100;      // minimum payment request, in KES
+const PTS_PER_KES = 10;        // 10 points = KES 1 (keep in sync with app.js)
 const uidOf = c => { if (!c.auth) throw new HttpsError('unauthenticated', 'Sign in first.'); return c.auth.uid; };
 // Admin = the Firebase custom claim `admin: true` OR a document at admins/{uid} in Firestore (either one is enough).
 // Clients can never write the admins collection (see firestore.rules); only you, via the Firebase console or Admin SDK.
@@ -41,6 +42,17 @@ const adminOnly = async c => {
   if (!(await db.doc('admins/' + c.auth.uid).get()).exists) throw new HttpsError('permission-denied', 'Admins only.');
 };
 const ledger = (t, e) => t.set(db.collection('ledger').doc(), { ...e, createdAt: FV.serverTimestamp() });
+// Same append-only points ledger that points.js writes to
+const pointLedger = (t, e) => t.set(db.collection('pointLedger').doc(), { pendingDelta: 0, approvedDelta: 0, ...e, createdAt: FV.serverTimestamp() });
+
+// Gives a payment request's money back to the user (used by admin reject and failed M-Pesa callbacks).
+// Refunds exactly what was taken: legacy KES balance and/or points. Older requests (no cashDeducted field) were all cash.
+function refundWithdrawal(t, w, withdrawalId) {
+  const cash = w.cashDeducted ?? w.amount, points = w.pointsDeducted || 0, upd = {};
+  if (cash > 0) { upd.approved = FV.increment(cash); ledger(t, { uid: w.uid, type: 'withdraw_refund', amount: cash, reward: 0, payout: 0, withdrawalId }); }
+  if (points > 0) { upd.approvedPoints = FV.increment(points); pointLedger(t, { uid: w.uid, type: 'payment_refund', approvedDelta: points, withdrawalId, note: 'Payment request refunded' }); }
+  if (Object.keys(upd).length) t.update(db.doc('users/' + w.uid), upd);
+}
 
 // Fraud #6: one phone per account; same device on another account => flagged
 api('registerProfile', async ({ auth, data }) => {
@@ -104,7 +116,7 @@ app.get('/postback', async (req, res) => {
       } else if (event === 'reversed' && ['pending', 'approved'].includes(task.status)) {
         const was = task.status; t.update(tRef, { status: 'reversed' });
         t.update(uRef, was === 'pending' ? { pending: FV.increment(-r) }
-          : { approved: FV.increment(-r), totalEarned: FV.increment(-r) });   // may go negative => blocks withdrawals
+          : { approved: FV.increment(-r), totalEarned: FV.increment(-r) });   // may go negative => blocks payment requests
         ledger(t, { ...base, type: 'reverse', amount: -r, reward: -r, payout: -pay });
       } else return 'ignored';
       t.set(pbRef, { partner, txn_id, event, taskId: tRef.id, createdAt: FV.serverTimestamp() });
@@ -114,19 +126,28 @@ app.get('/postback', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).send('error'); }
 });
 
+// Payment request. The user asks for an amount in KES; the server decides where it comes from:
+//   1) the legacy KES cash balance first, 2) then approved points at 10 points = KES 1.
+// Everything is checked and deducted in ONE transaction, so it cannot be double-spent.
 api('requestWithdrawal', async ({ auth, data }) => {
   const uid = uidOf({ auth }); const amount = Number(data.amount);
   if (!Number.isInteger(amount) || amount < MIN_WITHDRAW) throw new HttpsError('invalid-argument', `Minimum is KES ${MIN_WITHDRAW}.`);
   await db.runTransaction(async t => {
-    const uRef = db.doc('users/' + uid); const u = (await t.get(uRef)).data();
+    const uRef = db.doc('users/' + uid);
+    const open = db.collection('withdrawals').where('uid', '==', uid).where('status', '==', 'pending').limit(1);
+    const [uS, openS] = await Promise.all([t.get(uRef), t.get(open)]);   // pending check is inside the transaction now
+    const u = uS.data();
+    if (!u) throw new HttpsError('not-found', 'Profile not found.');
     if (u.status !== 'active') throw new HttpsError('permission-denied', 'Account under review. Contact support.');
-    if (u.approved < amount) throw new HttpsError('failed-precondition', 'Not enough approved balance.');
-    const open = await db.collection('withdrawals').where('uid', '==', uid).where('status', '==', 'pending').limit(1).get();
-    if (!open.empty) throw new HttpsError('failed-precondition', 'You already have a pending withdrawal.');
-    const w = db.collection('withdrawals').doc();
-    t.set(w, { uid, amount, phone: u.phone, name: u.name, status: 'pending', createdAt: FV.serverTimestamp() });
-    t.update(uRef, { approved: FV.increment(-amount) });
-    ledger(t, { uid, type: 'withdraw', amount: -amount, reward: 0, payout: 0, withdrawalId: w.id });
+    if (!openS.empty) throw new HttpsError('failed-precondition', 'You already have a pending payment request.');
+    const cash = Math.min(Math.max(0, u.approved || 0), amount);       // legacy KES balance used first
+    const points = (amount - cash) * PTS_PER_KES;                       // the rest comes from approved points
+    if (points > 0 && (u.approvedPoints || 0) < points) throw new HttpsError('failed-precondition', 'Not enough approved balance.');
+    const w = db.collection('withdrawals').doc(), upd = {};
+    t.set(w, { uid, amount, cashDeducted: cash, pointsDeducted: points, phone: u.phone, name: u.name, status: 'pending', createdAt: FV.serverTimestamp() });
+    if (cash > 0) { upd.approved = FV.increment(-cash); ledger(t, { uid, type: 'withdraw', amount: -cash, reward: 0, payout: 0, withdrawalId: w.id }); }
+    if (points > 0) { upd.approvedPoints = FV.increment(-points); pointLedger(t, { uid, type: 'payment_request', approvedDelta: -points, withdrawalId: w.id, note: `Payment request KES ${amount}` }); }
+    t.update(uRef, upd);
   });
   return { ok: true };
 });
@@ -176,8 +197,7 @@ api('adminDecideWithdrawal', async ({ auth, data }) => {
     if (decision === 'paid') t.update(wRef, { status: 'paid', note, decidedAt: FV.serverTimestamp() });
     else {
       t.update(wRef, { status: 'rejected', note, decidedAt: FV.serverTimestamp() });
-      t.update(db.doc('users/' + w.uid), { approved: FV.increment(w.amount) });
-      ledger(t, { uid: w.uid, type: 'withdraw_refund', amount: w.amount, reward: 0, payout: 0, withdrawalId: id });
+      refundWithdrawal(t, w, id);   // returns cash and/or points exactly as they were taken
     }
   });
   return { ok: true };
@@ -202,8 +222,7 @@ app.post('/mpesa/:kind', async (req, res) => {
         t.update(wRef, { status: 'paid', mpesaReceipt: rec?.Value || null, resultDesc: r.ResultDesc || '', decidedAt: FV.serverTimestamp() });
       } else {
         t.update(wRef, { status: 'failed', resultCode: code, resultDesc: r.ResultDesc || '', decidedAt: FV.serverTimestamp() });
-        t.update(db.doc('users/' + w.uid), { approved: FV.increment(w.amount) });
-        ledger(t, { uid: w.uid, type: 'withdraw_refund', amount: w.amount, reward: 0, payout: 0, withdrawalId: wRef.id });
+        refundWithdrawal(t, w, wRef.id);   // returns cash and/or points exactly as they were taken
       }
     });
     res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
