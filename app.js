@@ -10,6 +10,8 @@ const pts = n => Number(n || 0).toLocaleString() + ' pts';
 const PTS_PER_KES = 10;
 const ptsKes = n => 'KES ' + (Number(n || 0) / PTS_PER_KES).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const ptsVal = n => `${pts(n)} <span class="mute" style="font-size:.9rem">≈ ${ptsKes(n)}</span>`;
+const MIN_PAY = 100;   // minimum payment request in KES (keep in sync with server.js)
+const availKes = p => Math.max(0, p?.approved || 0) + Math.max(0, Math.floor((p?.approvedPoints || 0) / PTS_PER_KES));   // cash balance + approved points in KES
 const RATE_NOTE = `<p class="mute">Conversion rate: <b>${PTS_PER_KES} points = KES 1</b></p>`;
 const delta = n => n ? (n > 0 ? '+' : '') + Number(n).toLocaleString() : '—';
 const STATUS_TXT = { started: 'Started', pending_review: 'Awaiting review', approved: 'Approved', rejected: 'Rejected', reversed: 'Reversed', expired: 'Expired' };
@@ -145,9 +147,15 @@ const pages = {
 
   withdraw: async () => {
     const w = (await rows(query(collection(db, 'withdrawals'), where('uid', '==', user.uid)))).sort(byDate);
-    const avail = Math.max(0, profile?.approved || 0) + Math.max(0, Math.floor((profile?.approvedPoints || 0) / PTS_PER_KES));   // cash balance + approved points in KES
-    return `<h1>Request payment</h1>${RATE_NOTE}<form id="f"><p>Available: <b>${kes(avail)}</b><br><span class="mute">Payment is sent to ${esc(profile?.phone)} after review. Minimum KES 100.</span></p>
-    <label>Amount (KES)<input name="amt" type="number" min="100" max="${avail}" step="1" required></label><button>Request payment</button><div id="m"></div></form>
+    const avail = availKes(profile), cash = Math.max(0, profile?.approved || 0), ap = Math.max(0, profile?.approvedPoints || 0);
+    const can = avail >= MIN_PAY, short = Math.max(0, MIN_PAY * PTS_PER_KES - (cash * PTS_PER_KES + ap));
+    return `<h1>Request payment</h1>${RATE_NOTE}
+    <div class="grid"><div class="card"><div class="mute">Available to request</div><div class="big">${kes(avail)}</div>
+    <div class="mute">${pts(ap)} approved${cash > 0 ? ' + ' + kes(cash) + ' cash balance' : ''}</div></div></div>
+    <form id="f"><p class="mute">Payment is sent to ${esc(profile?.phone)} after review. Minimum ${kes(MIN_PAY)} (${pts(MIN_PAY * PTS_PER_KES)}).</p>
+    ${can ? '' : note(`You need at least ${kes(MIN_PAY)} to request payment. Earn ${pts(short)} more to unlock it.`)}
+    <label>Amount (KES)<input name="amt" type="number" min="${MIN_PAY}" max="${avail}" step="1" required ${can ? '' : 'disabled'}></label>
+    <button id="req" disabled>Request payment</button><div id="m"></div></form>
     <h2>Your payment requests</h2><div class="scroll"><table><tr><th>Date</th><th>Amount</th><th>Status</th><th>Note</th></tr>
     ${w.map(x => `<tr><td>${when(x.createdAt)}</td><td>${kes(x.amount)}</td><td class="${x.status}">${x.status}</td><td>${esc(x.note)}</td></tr>`).join('') || '<tr><td colspan=4>None yet.</td></tr>'}</table></div>`;
   },
@@ -207,6 +215,18 @@ const pages = {
       <label>Where is that permission recorded?<input name="providerPermissionNote" value="${esc(o.providerPermissionNote)}" maxlength="500" placeholder="e.g. email from provider, date / reference"></label>
       <label><input type="checkbox" name="active" ${o.active ? 'checked' : ''}> Active (visible to users)</label>
       <button>Save</button></form></details>`;
+    // ---- Manual payment requests ----
+    const OPEN = ['pending', 'submission_failed', 'submission_error', 'needs_review'];
+    const uf = id => users.find(u => u.id === id) || {}, local = ph => String(ph || '').replace(/^254/, '0');
+    const toPay = wd.filter(w => OPEN.includes(w.status)).sort((a, b) => byDate(b, a)), done = wd.filter(w => !OPEN.includes(w.status)).sort(byDate);
+    const payCard = w => { const u = uf(w.uid), how = [w.pointsDeducted ? pts(w.pointsDeducted) : '', w.cashDeducted ? kes(w.cashDeducted) + ' cash balance' : ''].filter(Boolean).join(' + ');
+      return `<div class="card"><div style="display:flex;flex-wrap:wrap;gap:1rem;justify-content:space-between"><div>
+      <b>${esc(w.name || u.name)}</b> <span class="tag ${esc(w.status)}">${esc(w.status)}</span><br>
+      M-Pesa number: <b>${esc(local(w.phone))}</b> <span class="mute">(${esc(w.phone)})</span> <button type="button" class="alt" data-copy="${esc(w.phone)}">Copy</button><br>
+      <span class="mute">Requested ${when(w.createdAt)} · Account: ${esc(u.status || 'unknown')}${u.flags?.length ? ' · ⚠ ' + esc(u.flags.join(', ')) : ''}</span></div>
+      <div><div class="big">${kes(w.amount)}</div><div class="mute">${how ? 'Deducted: ' + how : ''}</div></div></div>
+      ${['submission_error', 'needs_review'].includes(w.status) ? note('This may already have been sent through M-Pesa. Check your M-Pesa statement before paying again.') : ''}
+      <p><button data-w="${w.id}" data-d="paid">Mark as paid</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject &amp; refund</button></p></div>`; };
     const pointsHtml = `<h2>Points report</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${ptsVal(sum('pendingPoints'))}</div></div>
       <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${ptsVal(sum('approvedPoints'))}</div></div>
       <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${ptsVal(apprSince(7))}</div></div>
@@ -222,9 +242,10 @@ const pages = {
     return `<h1>Admin</h1>${pointsHtml}<h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
     <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
     <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>
-    <h2>Payment requests</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Phone</th><th>Amount</th><th>Status</th><th></th></tr>
-    ${wd.sort(byDate).map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(w.phone)}</td><td>${kes(w.amount)}</td><td class="${w.status}">${w.status}</td>
-    <td>${['pending', 'submission_failed'].includes(w.status) ? `<button data-w="${w.id}" data-d="mpesa">Pay via M-Pesa</button> ` : ''}${['pending', 'submission_failed', 'submission_error', 'needs_review'].includes(w.status) ? `<button class="alt" data-w="${w.id}" data-d="paid">Mark paid (manual)</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject</button>` : ''}</td></tr>`).join('') || '<tr><td colspan=6>None.</td></tr>'}</table></div>
+    <h2>Payments to make (${toPay.length})</h2><p class="mute">Send the money manually from M-Pesa to the number shown, then press <b>Mark as paid</b> and enter the M-Pesa confirmation code. Reject refunds the user's balance.</p>
+    ${toPay.map(payCard).join('') || '<p class="mute">No payment requests waiting.</p>'}
+    <h2>Payment history</h2><div class="scroll"><table><tr><th>Requested</th><th>Name</th><th>M-Pesa number</th><th>Amount</th><th>Status</th><th>M-Pesa code / note</th></tr>
+    ${done.map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(local(w.phone))}</td><td>${kes(w.amount)}</td><td class="${esc(w.status)}">${esc(w.status)}</td><td>${esc(w.mpesaReceipt || w.note || '')}</td></tr>`).join('') || '<tr><td colspan=6>None yet.</td></tr>'}</table></div>
     <h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
     ${sus.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${u.status}">${u.status}</td><td>${esc((u.flags || []).join(', '))}</td><td>${ub(u, 'suspended', 'Suspend')} ${ub(u, 'active', 'Clear')}</td></tr>`).join('') || '<tr><td colspan=5>Nothing flagged.</td></tr>'}</table></div>
     <h2>Advertising partners</h2><form id="pf" class="wide" style="display:flex;gap:.5rem"><input name="n" placeholder="Partner name" required><button>Add partner</button></form>
@@ -275,7 +296,17 @@ const bind = {
     };
   },
   task(id) { const b = $('#go'); if (b) b.onclick = async () => { try { const r = await call('startTask')({ campaignId: id }); if (r.url) window.open(r.url, '_blank', 'noopener'); msg(0, 'Task started. Complete the steps; your reward appears as pending once the partner confirms.'); b.remove(); } catch (x) { msg(0, err(x)); } }; },
-  withdraw() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); try { await call('requestWithdrawal')({ amount: +f.amt.value }); location.hash = '#/withdraw'; route(); } catch (x) { msg(0, err(x)); } }; },
+  withdraw() {
+    const f = $('#f'), btn = $('#req'), max = availKes(profile);
+    // Button stays inactive unless the amount is a whole number between KES 100 and the available balance
+    const ok = () => { const v = Number(f.amt.value); return Number.isInteger(v) && v >= MIN_PAY && v <= max; };
+    const sync = () => { btn.disabled = !ok(); };
+    f.amt.addEventListener('input', sync); sync();
+    f.onsubmit = async e => {
+      e.preventDefault(); if (!ok()) return; btn.disabled = true;
+      try { await call('requestWithdrawal')({ amount: +f.amt.value }); location.hash = '#/withdraw'; route(); } catch (x) { msg(0, err(x)); sync(); }
+    };
+  },
   support() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); await addDoc(collection(db, 'tickets'), { uid: user.uid, subject: f.s.value, message: f.m.value, createdAt: serverTimestamp(), reply: '' }); route(); }; },
   admin() {
     if (!isAdmin) return;   // page shows 'Admins only.'; nothing to bind
@@ -289,7 +320,12 @@ const bind = {
       return call('adminUpdateOpportunity')({ id: f.dataset.id, title: v('title'), provider: v('provider'), partnerId: v('partnerId'), providerZoneId: v('providerZoneId'), destinationUrl: v('destinationUrl'),
         trackingParam: v('trackingParam'), activityType: v('activityType'), rewardPoints: +v('rewardPoints'), cooldownMinutes: +v('cooldownMinutes'), requirements: v('requirements'),
         incentiveApproved: f.elements.incentiveApproved.checked, providerPermissionNote: v('providerPermissionNote'), active: f.elements.active.checked }); }));
-    app.querySelectorAll('[data-w]').forEach(b => b.onclick = act(() => call('adminDecideWithdrawal')({ id: b.dataset.w, decision: b.dataset.d, note: b.dataset.d === 'mpesa' ? '' : (prompt('Note (optional, e.g. M-Pesa code)') || '') })));
+    app.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => { b.textContent = 'Copied'; }, () => {}));
+    app.querySelectorAll('[data-w]').forEach(b => b.onclick = act(() => {
+      const paid = b.dataset.d === 'paid';
+      const n = prompt(paid ? 'Enter the M-Pesa confirmation code for this payment (e.g. SGH7K2L9QX):' : 'Reason for rejecting (the user\'s balance will be refunded):'); if (n === null) return;
+      if (!paid || confirm('Confirm: you have already sent this payment through M-Pesa?')) return call('adminDecideWithdrawal')({ id: b.dataset.w, decision: b.dataset.d, note: n.trim() });
+    }));
     app.querySelectorAll('[data-st]').forEach(b => b.onclick = act(() => call('adminSetUserStatus')({ uid: b.dataset.uid, status: b.dataset.st })));
     app.querySelectorAll('[data-c]').forEach(b => b.onclick = act(() => updateDoc(doc(db, 'campaigns', b.dataset.c), { active: b.dataset.on === 'true' })));
     app.querySelectorAll('.rf').forEach(f => f.onsubmit = act(e => { e.preventDefault(); return updateDoc(doc(db, 'tickets', f.dataset.t), { reply: f.r.value }); }));
