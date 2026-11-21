@@ -6,6 +6,11 @@ const $ = s => document.querySelector(s), app = $('#app');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const kes = n => 'KES ' + Number(n || 0).toLocaleString();
 const pts = n => Number(n || 0).toLocaleString() + ' pts';
+// Conversion rate: 10 points = KES 1. Display only; the server must do the real conversion.
+const PTS_PER_KES = 10;
+const ptsKes = n => 'KES ' + (Number(n || 0) / PTS_PER_KES).toLocaleString(undefined, { maximumFractionDigits: 2 });
+const ptsVal = n => `${pts(n)} <span class="mute" style="font-size:.9rem">≈ ${ptsKes(n)}</span>`;
+const RATE_NOTE = `<p class="mute">Conversion rate: <b>${PTS_PER_KES} points = KES 1</b></p>`;
 const delta = n => n ? (n > 0 ? '+' : '') + Number(n).toLocaleString() : '—';
 const STATUS_TXT = { started: 'Started', pending_review: 'Awaiting review', approved: 'Approved', rejected: 'Rejected', reversed: 'Reversed', expired: 'Expired' };
 const LEDGER_TXT = { reward_pending: 'Partner confirmed (pending)', reward_approved: 'Approved', reward_rejected: 'Rejected', reward_reversed: 'Reversed by partner', admin_adjustment: 'Adjustment' };
@@ -43,7 +48,7 @@ onAuthStateChanged(auth, async u => {
 window.onhashchange = route;
 
 function nav() {
-  const L = user ? [['dashboard', 'Dashboard'], ['earn', 'Earn'], ['wallet', 'Wallet'], ['withdraw', 'Withdraw'], ['history', 'History'], ['support', 'Support']] : [['home', 'Home'], ['login', 'Log in']];
+  const L = user ? [['dashboard', 'Dashboard'], ['earn', 'Earn'], ['wallet', 'Wallet'], ['withdraw', 'Request Payment'], ['history', 'History'], ['support', 'Support']] : [['home', 'Home'], ['login', 'Log in']];
   if (isAdmin) L.push(['admin', 'Admin']);
   const cur = location.hash.split('/')[1] || 'home';
   $('#nav').innerHTML = L.map(([k, t]) => `<a href="#/${k}" class="${cur === k ? 'on' : ''}">${t}</a>`).join('') + (user ? '<a href="#" id="out">Log out</a>' : '');
@@ -64,7 +69,7 @@ const pages = {
   <h2>How it works</h2><ol class="steps"><li><b>Pick an opportunity</b><br><span class="mute">Read the requirements and reward first.</span></li>
   <li><b>Complete it</b><br><span class="mute">Follow the partner's steps exactly.</span></li>
   <li><b>Confirmation and review</b><br><span class="mute">Points show as pending, then approved after review.</span></li>
-  <li><b>Redeem</b><br><span class="mute">Redeeming approved points for M-Pesa is coming soon.</span></li></ol>
+  <li><b>Request payment</b><br><span class="mute">Request payment for your approved balance. 10 points = KES 1.</span></li></ol>
   <h2>Fair play</h2><p class="mute">One account per person and phone. Each opportunity has a waiting time before you can repeat it. Rewards the partner later reverses are removed. Accounts showing bot or duplicate activity are suspended.</p>`,
 
   login: () => user ? (location.hash = '#/dashboard', '') : `<h1>Welcome</h1><form id="f">
@@ -80,11 +85,11 @@ const pages = {
     const n = s => a.filter(x => x.status === s).length, m = s => t.filter(x => x.status === s).length;
     const legacy = profile.totalEarned || profile.approved || profile.pending || t.length;
     return `<h1>Hi, ${esc(profile.name.split(' ')[0])}</h1>${profile.status !== 'active' ? note('Your account is under review. Contact Support.') : ''}
-    <div class="grid"><div class="card"><div class="mute">Approved points</div><div class="big">${pts(profile.approvedPoints)}</div></div>
-    <div class="card"><div class="mute">Pending (awaiting review)</div><div class="big">${pts(profile.pendingPoints)}</div></div>
-    <div class="card"><div class="mute">Lifetime points earned</div><div class="big">${pts(profile.lifetimePointsEarned)}</div></div>
+    <div class="grid"><div class="card"><div class="mute">Approved points</div><div class="big">${ptsVal(profile.approvedPoints)}</div></div>
+    <div class="card"><div class="mute">Pending (awaiting review)</div><div class="big">${ptsVal(profile.pendingPoints)}</div></div>
+    <div class="card"><div class="mute">Lifetime points earned</div><div class="big">${ptsVal(profile.lifetimePointsEarned)}</div></div>
     <div class="card"><div class="mute">Activities approved / awaiting review / rejected</div><div class="big">${n('approved')} / ${n('pending_review')} / ${n('rejected') + n('reversed')}</div></div></div>
-    <p><a class="btn gold" href="#/earn">Find an opportunity</a></p>
+    ${RATE_NOTE}<p><a class="btn gold" href="#/earn">Find an opportunity</a></p>
     ${legacy ? `<h2>Cash balance (earlier tasks)</h2><div class="grid"><div class="card"><div class="mute">Available</div><div class="big">${kes(profile.approved)}</div></div>
     <div class="card"><div class="mute">Pending partner confirmation</div><div class="big">${kes(profile.pending)}</div></div>
     <div class="card"><div class="mute">Total earned</div><div class="big">${kes(profile.totalEarned)}</div></div>
@@ -96,8 +101,8 @@ const pages = {
       rows(query(collection(db, 'cooldowns'), where('uid', '==', user.uid))), rows(query(collection(db, 'campaigns'), where('active', '==', true)))]);
     opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     const until = Object.fromEntries(cds.map(x => [x.opportunityId, x.cooldownUntil?.toMillis?.() || 0]));
-    return `<h1>Opportunities</h1>` + (opps.length ? `<div class="grid">${opps.map(x => `<div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span><br><b>${esc(x.title)}</b>
-    <div class="big">${pts(x.rewardPoints)}</div><div class="mute">After partner confirmation and review · repeat every ${x.cooldownMinutes} min</div>
+    return `<h1>Opportunities</h1>${RATE_NOTE}` + (opps.length ? `<div class="grid">${opps.map(x => `<div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span><br><b>${esc(x.title)}</b>
+    <div class="big">${ptsVal(x.rewardPoints)}</div><div class="mute">After partner confirmation and review · repeat every ${x.cooldownMinutes} min</div>
     <div class="mute" data-until="${until[x.id] || 0}"></div>
     <p><a class="btn" href="#/opportunity/${esc(x.id)}">View details</a></p></div>`).join('')}</div>` : note('No opportunities right now. Check back soon.'))
     + (c.length ? `<h2>Cash tasks (KES)</h2><div class="grid">${c.map(x => `<div class="card"><b>${esc(x.title)}</b>
@@ -109,7 +114,7 @@ const pages = {
     const o = await getDoc(doc(db, 'opportunities', id)); if (!o.exists() || !o.data().active) return note('This opportunity is not available.');
     const x = o.data(), c = await getDoc(doc(db, 'cooldowns', `${user.uid}_${id}`)), until = c.exists() ? c.data().cooldownUntil?.toMillis?.() || 0 : 0;
     return `<h1>${esc(x.title)}</h1><div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span>
-    <div class="big">${pts(x.rewardPoints)}</div><h2>Requirements</h2><p style="white-space:pre-wrap">${esc(x.requirements)}</p>
+    <div class="big">${ptsVal(x.rewardPoints)}</div><h2>Requirements</h2><p style="white-space:pre-wrap">${esc(x.requirements)}</p>
     <p class="mute">Points are added only after the partner confirms your activity and SemaAfrica approves it. Opening the link on its own does not earn points. You can repeat this every ${x.cooldownMinutes} minutes.</p>
     <p class="mute" id="cd" data-until="${until}"></p>
     <button id="go" ${until > Date.now() ? 'disabled' : ''}>Open sponsored task</button><div id="m"></div></div>`;
@@ -127,22 +132,22 @@ const pages = {
   wallet: async () => {
     const [pl, l] = await Promise.all([rows(query(collection(db, 'pointLedger'), where('uid', '==', user.uid))), rows(query(collection(db, 'ledger'), where('uid', '==', user.uid)))]);
     pl.sort(byDate); l.sort(byDate);
-    return `<h1>Points wallet</h1><div class="grid"><div class="card"><div class="mute">Pending</div><div class="big">${pts(profile?.pendingPoints)}</div></div>
-    <div class="card"><div class="mute">Approved</div><div class="big">${pts(profile?.approvedPoints)}</div></div></div>
-    <p class="mute">Redeeming approved points for M-Pesa is coming soon.</p>
+    return `<h1>Points wallet</h1><div class="grid"><div class="card"><div class="mute">Pending</div><div class="big">${ptsVal(profile?.pendingPoints)}</div></div>
+    <div class="card"><div class="mute">Approved</div><div class="big">${ptsVal(profile?.approvedPoints)}</div></div></div>
+    ${RATE_NOTE}<p class="mute">You can request payment for your approved balance from the Request Payment page.</p>
     <h2>Points activity</h2><div class="scroll"><table><tr><th>Date</th><th>Type</th><th>Pending</th><th>Approved</th></tr>
     ${pl.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(LEDGER_TXT[x.type] || x.type)}</td><td>${delta(x.pendingDelta)}</td><td>${delta(x.approvedDelta)}</td></tr>`).join('') || '<tr><td colspan=4>No points activity yet.</td></tr>'}</table></div>
     ${l.length || profile?.approved || profile?.pending ? `<h2>Cash wallet (earlier tasks)</h2><div class="grid"><div class="card"><div class="mute">Pending</div><div class="big">${kes(profile?.pending)}</div></div>
-    <div class="card"><div class="mute">Approved (withdrawable)</div><div class="big">${kes(profile?.approved)}</div></div></div>
+    <div class="card"><div class="mute">Approved (payable)</div><div class="big">${kes(profile?.approved)}</div></div></div>
     <div class="scroll"><table><tr><th>Date</th><th>Type</th><th>Amount</th></tr>
     ${l.map(x => `<tr><td>${when(x.createdAt)}</td><td>${x.type.replace('_', ' ')}</td><td>${kes(x.amount)}</td></tr>`).join('')}</table></div>` : ''}`;
   },
 
   withdraw: async () => {
     const w = (await rows(query(collection(db, 'withdrawals'), where('uid', '==', user.uid)))).sort(byDate);
-    return `<h1>Withdraw to M-Pesa</h1><form id="f"><p>Available: <b>${kes(profile?.approved)}</b><br><span class="mute">Sent to ${esc(profile?.phone)}. Minimum KES 100.</span></p>
-    <label>Amount (KES)<input name="amt" type="number" min="100" step="1" required></label><button>Request withdrawal</button><div id="m"></div></form>
-    <h2>Your requests</h2><div class="scroll"><table><tr><th>Date</th><th>Amount</th><th>Status</th><th>Note</th></tr>
+    return `<h1>Request payment</h1>${RATE_NOTE}<form id="f"><p>Available: <b>${kes(profile?.approved)}</b><br><span class="mute">Payment is sent to ${esc(profile?.phone)} after review. Minimum KES 100.</span></p>
+    <label>Amount (KES)<input name="amt" type="number" min="100" step="1" required></label><button>Request payment</button><div id="m"></div></form>
+    <h2>Your payment requests</h2><div class="scroll"><table><tr><th>Date</th><th>Amount</th><th>Status</th><th>Note</th></tr>
     ${w.map(x => `<tr><td>${when(x.createdAt)}</td><td>${kes(x.amount)}</td><td class="${x.status}">${x.status}</td><td>${esc(x.note)}</td></tr>`).join('') || '<tr><td colspan=4>None yet.</td></tr>'}</table></div>`;
   },
 
@@ -150,7 +155,7 @@ const pages = {
     const [a, t] = await Promise.all([rows(query(collection(db, 'activityAttempts'), where('uid', '==', user.uid))), rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)))]);
     a.sort(byDate); t.sort(byDate);
     return `<h1>History</h1><div class="scroll"><table><tr><th>Date</th><th>Opportunity</th><th>Points</th><th>Status</th><th>Note</th></tr>
-    ${a.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(x.opportunityCode)} · ${esc(x.opportunityTitle)}</td><td>${pts(x.rewardPoints)}</td><td>${stat(x.status)}</td><td>${esc(x.reviewNote)}</td></tr>`).join('') || '<tr><td colspan=5>No activity yet.</td></tr>'}</table></div>
+    ${a.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(x.opportunityCode)} · ${esc(x.opportunityTitle)}</td><td>${ptsVal(x.rewardPoints)}</td><td>${stat(x.status)}</td><td>${esc(x.reviewNote)}</td></tr>`).join('') || '<tr><td colspan=5>No activity yet.</td></tr>'}</table></div>
     ${t.length ? `<h2>Earlier cash tasks</h2><div class="scroll"><table><tr><th>Date</th><th>Task</th><th>Reward</th><th>Status</th></tr>
     ${t.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(x.title)}</td><td>${kes(x.reward)}</td><td class="${x.status}">${x.status}</td></tr>`).join('')}</table></div>` : ''}
     <p class="mute">Points movements appear under Wallet.</p>`;
@@ -201,11 +206,11 @@ const pages = {
       <label>Where is that permission recorded?<input name="providerPermissionNote" value="${esc(o.providerPermissionNote)}" maxlength="500" placeholder="e.g. email from provider, date / reference"></label>
       <label><input type="checkbox" name="active" ${o.active ? 'checked' : ''}> Active (visible to users)</label>
       <button>Save</button></form></details>`;
-    const pointsHtml = `<h2>Points report</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${pts(sum('pendingPoints'))}</div></div>
-      <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${pts(sum('approvedPoints'))}</div></div>
-      <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${pts(apprSince(7))}</div></div>
-      <div class="card"><div class="mute">Approved in last 30 days</div><div class="big">${pts(apprSince(30))}</div></div></div>
-      <p class="mute">Redemptions: not built yet. Opportunity counts below come from SemaAfrica's own records (latest 200 activities), not from provider reports.</p>
+    const pointsHtml = `<h2>Points report</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${ptsVal(sum('pendingPoints'))}</div></div>
+      <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${ptsVal(sum('approvedPoints'))}</div></div>
+      <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${ptsVal(apprSince(7))}</div></div>
+      <div class="card"><div class="mute">Approved in last 30 days</div><div class="big">${ptsVal(apprSince(30))}</div></div></div>
+      <p class="mute">Rate: ${PTS_PER_KES} points = KES 1. Opportunity counts below come from SemaAfrica's own records (latest 200 activities), not from provider reports.</p>
       <h2>Awaiting review (provider confirmed)</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Provider event</th><th>Note</th><th></th></tr>
       ${queue.map(a => arow(a, false)).join('') || '<tr><td colspan=8>Nothing waiting.</td></tr>'}</table></div>
       <h2>Recent activity</h2><p class="mute">"Started" means no provider confirmation yet. Approve those only with real evidence and write what you checked in the note.</p>
@@ -216,7 +221,7 @@ const pages = {
     return `<h1>Admin</h1>${pointsHtml}<h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
     <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
     <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>
-    <h2>Withdrawal requests</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Phone</th><th>Amount</th><th>Status</th><th></th></tr>
+    <h2>Payment requests</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Phone</th><th>Amount</th><th>Status</th><th></th></tr>
     ${wd.sort(byDate).map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(w.phone)}</td><td>${kes(w.amount)}</td><td class="${w.status}">${w.status}</td>
     <td>${['pending', 'submission_failed'].includes(w.status) ? `<button data-w="${w.id}" data-d="mpesa">Pay via M-Pesa</button> ` : ''}${['pending', 'submission_failed', 'submission_error', 'needs_review'].includes(w.status) ? `<button class="alt" data-w="${w.id}" data-d="paid">Mark paid (manual)</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject</button>` : ''}</td></tr>`).join('') || '<tr><td colspan=6>None.</td></tr>'}</table></div>
     <h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
