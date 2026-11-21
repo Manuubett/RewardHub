@@ -1,13 +1,26 @@
 import { auth, db, API_URL } from './firebase-config.js';
 import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { collection, doc, getDoc, getDocs, onSnapshot, query, where, addDoc, setDoc, updateDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { collection, doc, getDoc, getDocs, onSnapshot, query, where, addDoc, setDoc, updateDoc, serverTimestamp, orderBy, limit } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const $ = s => document.querySelector(s), app = $('#app');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const kes = n => 'KES ' + Number(n || 0).toLocaleString();
+const pts = n => Number(n || 0).toLocaleString() + ' pts';
+const delta = n => n ? (n > 0 ? '+' : '') + Number(n).toLocaleString() : '—';
+const STATUS_TXT = { started: 'Started', pending_review: 'Awaiting review', approved: 'Approved', rejected: 'Rejected', reversed: 'Reversed', expired: 'Expired' };
+const LEDGER_TXT = { reward_pending: 'Partner confirmed (pending)', reward_approved: 'Approved', reward_rejected: 'Rejected', reward_reversed: 'Reversed by partner', admin_adjustment: 'Adjustment' };
+const stat = s => `<span class="${esc(s)}">${esc(STATUS_TXT[s] || s)}</span>`;
+const left = ms => { const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}h ${m}m` : `${m}m ${String(s % 60).padStart(2, '0')}s`; };
+let timer = null;
+// Shows "Available again in ..." for every [data-until] element. The browser only DISPLAYS the cooldown; the server enforces it.
+function countdowns() {
+  clearInterval(timer); const els = [...app.querySelectorAll('[data-until]')]; if (!els.length) return;
+  const tick = () => els.forEach(el => { const ms = +el.dataset.until - Date.now(); el.textContent = ms > 0 ? 'Available again in ' + left(ms) : 'Available now'; if (ms <= 0) $('#go')?.removeAttribute('disabled'); });
+  tick(); timer = setInterval(tick, 1000);
+}
 const call = n => async d => {
   const r = await fetch(API_URL.replace(/\/+$/, '') + '/api/' + n, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await auth.currentUser.getIdToken() }, body: JSON.stringify(d || {}) });
-  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Could not reach the server.'); return j;
+  const j = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(j.error || 'Could not reach the server.'); e.data = j; throw e; } return j;
 };
 const when = t => t?.toDate ? t.toDate().toLocaleString() : '';
 const rows = async (q) => (await getDocs(q)).docs.map(d => ({ id: d.id, ...d.data() }));
@@ -20,8 +33,9 @@ let user = null, profile = null, isAdmin = false, unsub = null;
 onAuthStateChanged(auth, async u => {
   user = u; unsub?.(); profile = null; isAdmin = false;
   if (u) {
-    isAdmin = await getDoc(doc(db, 'admins', u.uid)).then(d => d.exists(), () => false);
-    unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|support|admin|task/.test(location.hash)) route(); }, () => {});
+    // One admin model everywhere: the Firebase custom claim `admin: true` (same check as the server and Firestore rules).
+    isAdmin = await u.getIdTokenResult(true).then(t => t.claims.admin === true, () => false);
+    unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|support|admin|task|opportunity/.test(location.hash)) route(); }, () => {});
   }
   route();
 });
@@ -36,21 +50,21 @@ function nav() {
 }
 
 async function route() {
-  nav(); const [, p = 'home', arg] = location.hash.split('/');
+  clearInterval(timer); nav(); const [, p = 'home', arg] = location.hash.split('/');
   const open = ['home', 'login'];
   if (!user && !open.includes(p)) return (location.hash = '#/login');
   try { app.innerHTML = await (pages[p] || pages.home)(arg); bind[p]?.(arg); } catch (e) { app.innerHTML = note(err(e)); }
 }
 
 const pages = {
-  home: () => `<section class="hero"><h1>Get paid in M-Pesa for tasks advertisers confirm.</h1>
-  <p>Try offers from real advertising partners. You are paid when the partner confirms your task, not when you click.</p>
-  <a class="btn gold" href="#/${user ? 'earn' : 'login'}">${user ? 'See tasks' : 'Create free account'}</a></section>
-  <h2>How it works</h2><ol class="steps"><li><b>Pick a task</b><br><span class="mute">Read the requirements and reward first.</span></li>
+  home: () => `<section class="hero"><h1>Earn points for sponsored tasks partners confirm.</h1>
+  <p>Open a sponsored task, complete the requirements and earn points once the partner confirms your activity and we approve it. Clicking alone never earns points.</p>
+  <a class="btn gold" href="#/${user ? 'earn' : 'login'}">${user ? 'See opportunities' : 'Create free account'}</a></section>
+  <h2>How it works</h2><ol class="steps"><li><b>Pick an opportunity</b><br><span class="mute">Read the requirements and reward first.</span></li>
   <li><b>Complete it</b><br><span class="mute">Follow the partner's steps exactly.</span></li>
-  <li><b>Partner confirms</b><br><span class="mute">Reward shows as pending, then approved.</span></li>
-  <li><b>Withdraw</b><br><span class="mute">Request M-Pesa payout from KES 100.</span></li></ol>
-  <h2>Fair play</h2><p class="mute">One account per person and phone. Rewards from conversions that advertisers later reverse are removed. Accounts showing bot or duplicate activity are suspended.</p>`,
+  <li><b>Confirmation and review</b><br><span class="mute">Points show as pending, then approved after review.</span></li>
+  <li><b>Redeem</b><br><span class="mute">Redeeming approved points for M-Pesa is coming soon.</span></li></ol>
+  <h2>Fair play</h2><p class="mute">One account per person and phone. Each opportunity has a waiting time before you can repeat it. Rewards the partner later reverses are removed. Accounts showing bot or duplicate activity are suspended.</p>`,
 
   login: () => user ? (location.hash = '#/dashboard', '') : `<h1>Welcome</h1><form id="f">
   <div id="reg" hidden><label>Full name<input name="name" autocomplete="name"></label>
@@ -61,21 +75,43 @@ const pages = {
 
   dashboard: async () => {
     if (!profile) return note('Setting up your account…');
-    const t = await rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)));
-    const n = s => t.filter(x => x.status === s).length;
-    return `<h1>Hi, ${esc(profile.name.split(' ')[0])}</h1>${profile.status !== 'active' ? note('Your account is under review. Withdrawals are paused. Contact Support.') : ''}
-    <div class="grid"><div class="card"><div class="mute">Available</div><div class="big">${kes(profile.approved)}</div></div>
+    const [a, t] = await Promise.all([rows(query(collection(db, 'activityAttempts'), where('uid', '==', user.uid))), rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)))]);
+    const n = s => a.filter(x => x.status === s).length, m = s => t.filter(x => x.status === s).length;
+    const legacy = profile.totalEarned || profile.approved || profile.pending || t.length;
+    return `<h1>Hi, ${esc(profile.name.split(' ')[0])}</h1>${profile.status !== 'active' ? note('Your account is under review. Contact Support.') : ''}
+    <div class="grid"><div class="card"><div class="mute">Approved points</div><div class="big">${pts(profile.approvedPoints)}</div></div>
+    <div class="card"><div class="mute">Pending (awaiting review)</div><div class="big">${pts(profile.pendingPoints)}</div></div>
+    <div class="card"><div class="mute">Lifetime points earned</div><div class="big">${pts(profile.lifetimePointsEarned)}</div></div>
+    <div class="card"><div class="mute">Activities approved / awaiting review / rejected</div><div class="big">${n('approved')} / ${n('pending_review')} / ${n('rejected') + n('reversed')}</div></div></div>
+    <p><a class="btn gold" href="#/earn">Find an opportunity</a></p>
+    ${legacy ? `<h2>Cash balance (earlier tasks)</h2><div class="grid"><div class="card"><div class="mute">Available</div><div class="big">${kes(profile.approved)}</div></div>
     <div class="card"><div class="mute">Pending partner confirmation</div><div class="big">${kes(profile.pending)}</div></div>
     <div class="card"><div class="mute">Total earned</div><div class="big">${kes(profile.totalEarned)}</div></div>
-    <div class="card"><div class="mute">Tasks approved / pending / reversed</div><div class="big">${n('approved')} / ${n('pending')} / ${n('reversed')}</div></div></div>
-    <p><a class="btn gold" href="#/earn">Find a task</a></p>`;
+    <div class="card"><div class="mute">Tasks approved / pending / reversed</div><div class="big">${m('approved')} / ${m('pending')} / ${m('reversed')}</div></div></div>` : ''}`;
   },
 
   earn: async () => {
-    const c = (await rows(query(collection(db, 'campaigns'), where('active', '==', true))));
-    return `<h1>Available tasks</h1>` + (c.length ? `<div class="grid">${c.map(x => `<div class="card"><b>${esc(x.title)}</b>
+    const [opps, cds, c] = await Promise.all([rows(query(collection(db, 'opportunities'), where('active', '==', true))),
+      rows(query(collection(db, 'cooldowns'), where('uid', '==', user.uid))), rows(query(collection(db, 'campaigns'), where('active', '==', true)))]);
+    opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    const until = Object.fromEntries(cds.map(x => [x.opportunityId, x.cooldownUntil?.toMillis?.() || 0]));
+    return `<h1>Opportunities</h1>` + (opps.length ? `<div class="grid">${opps.map(x => `<div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span><br><b>${esc(x.title)}</b>
+    <div class="big">${pts(x.rewardPoints)}</div><div class="mute">After partner confirmation and review · repeat every ${x.cooldownMinutes} min</div>
+    <div class="mute" data-until="${until[x.id] || 0}"></div>
+    <p><a class="btn" href="#/opportunity/${esc(x.id)}">View details</a></p></div>`).join('')}</div>` : note('No opportunities right now. Check back soon.'))
+    + (c.length ? `<h2>Cash tasks (KES)</h2><div class="grid">${c.map(x => `<div class="card"><b>${esc(x.title)}</b>
     <div class="big">${kes(x.reward)}</div><div class="mute">${x.type === 'cpc' ? 'Paid for a valid click' : 'Paid on completed action'}</div>
-    <p><a class="btn" href="#/task/${x.id}">View details</a></p></div>`).join('')}</div>` : note('No tasks right now. Check back soon.'));
+    <p><a class="btn" href="#/task/${x.id}">View details</a></p></div>`).join('')}</div>` : '');
+  },
+
+  opportunity: async id => {
+    const o = await getDoc(doc(db, 'opportunities', id)); if (!o.exists() || !o.data().active) return note('This opportunity is not available.');
+    const x = o.data(), c = await getDoc(doc(db, 'cooldowns', `${user.uid}_${id}`)), until = c.exists() ? c.data().cooldownUntil?.toMillis?.() || 0 : 0;
+    return `<h1>${esc(x.title)}</h1><div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span>
+    <div class="big">${pts(x.rewardPoints)}</div><h2>Requirements</h2><p style="white-space:pre-wrap">${esc(x.requirements)}</p>
+    <p class="mute">Points are added only after the partner confirms your activity and SemaAfrica approves it. Opening the link on its own does not earn points. You can repeat this every ${x.cooldownMinutes} minutes.</p>
+    <p class="mute" id="cd" data-until="${until}"></p>
+    <button id="go" ${until > Date.now() ? 'disabled' : ''}>Open sponsored task</button><div id="m"></div></div>`;
   },
 
   task: async id => {
@@ -88,11 +124,17 @@ const pages = {
   },
 
   wallet: async () => {
-    const l = (await rows(query(collection(db, 'ledger'), where('uid', '==', user.uid)))).sort(byDate);
-    return `<h1>Wallet</h1><div class="grid"><div class="card"><div class="mute">Pending</div><div class="big">${kes(profile?.pending)}</div></div>
+    const [pl, l] = await Promise.all([rows(query(collection(db, 'pointLedger'), where('uid', '==', user.uid))), rows(query(collection(db, 'ledger'), where('uid', '==', user.uid)))]);
+    pl.sort(byDate); l.sort(byDate);
+    return `<h1>Points wallet</h1><div class="grid"><div class="card"><div class="mute">Pending</div><div class="big">${pts(profile?.pendingPoints)}</div></div>
+    <div class="card"><div class="mute">Approved</div><div class="big">${pts(profile?.approvedPoints)}</div></div></div>
+    <p class="mute">Redeeming approved points for M-Pesa is coming soon.</p>
+    <h2>Points activity</h2><div class="scroll"><table><tr><th>Date</th><th>Type</th><th>Pending</th><th>Approved</th></tr>
+    ${pl.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(LEDGER_TXT[x.type] || x.type)}</td><td>${delta(x.pendingDelta)}</td><td>${delta(x.approvedDelta)}</td></tr>`).join('') || '<tr><td colspan=4>No points activity yet.</td></tr>'}</table></div>
+    ${l.length || profile?.approved || profile?.pending ? `<h2>Cash wallet (earlier tasks)</h2><div class="grid"><div class="card"><div class="mute">Pending</div><div class="big">${kes(profile?.pending)}</div></div>
     <div class="card"><div class="mute">Approved (withdrawable)</div><div class="big">${kes(profile?.approved)}</div></div></div>
-    <h2>Transactions</h2><div class="scroll"><table><tr><th>Date</th><th>Type</th><th>Amount</th></tr>
-    ${l.map(x => `<tr><td>${when(x.createdAt)}</td><td>${x.type.replace('_', ' ')}</td><td>${kes(x.amount)}</td></tr>`).join('') || '<tr><td colspan=3>No transactions yet.</td></tr>'}</table></div>`;
+    <div class="scroll"><table><tr><th>Date</th><th>Type</th><th>Amount</th></tr>
+    ${l.map(x => `<tr><td>${when(x.createdAt)}</td><td>${x.type.replace('_', ' ')}</td><td>${kes(x.amount)}</td></tr>`).join('')}</table></div>` : ''}`;
   },
 
   withdraw: async () => {
@@ -104,10 +146,13 @@ const pages = {
   },
 
   history: async () => {
-    const t = (await rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)))).sort(byDate);
-    return `<h1>History</h1><div class="scroll"><table><tr><th>Date</th><th>Task</th><th>Reward</th><th>Status</th></tr>
-    ${t.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(x.title)}</td><td>${kes(x.reward)}</td><td class="${x.status}">${x.status}</td></tr>`).join('') || '<tr><td colspan=4>No tasks yet.</td></tr>'}</table></div>
-    <p class="mute">Payments appear under Wallet and Withdraw.</p>`;
+    const [a, t] = await Promise.all([rows(query(collection(db, 'activityAttempts'), where('uid', '==', user.uid))), rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)))]);
+    a.sort(byDate); t.sort(byDate);
+    return `<h1>History</h1><div class="scroll"><table><tr><th>Date</th><th>Opportunity</th><th>Points</th><th>Status</th><th>Note</th></tr>
+    ${a.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(x.opportunityCode)} · ${esc(x.opportunityTitle)}</td><td>${pts(x.rewardPoints)}</td><td>${stat(x.status)}</td><td>${esc(x.reviewNote)}</td></tr>`).join('') || '<tr><td colspan=5>No activity yet.</td></tr>'}</table></div>
+    ${t.length ? `<h2>Earlier cash tasks</h2><div class="scroll"><table><tr><th>Date</th><th>Task</th><th>Reward</th><th>Status</th></tr>
+    ${t.map(x => `<tr><td>${when(x.createdAt)}</td><td>${esc(x.title)}</td><td>${kes(x.reward)}</td><td class="${x.status}">${x.status}</td></tr>`).join('')}</table></div>` : ''}
+    <p class="mute">Points movements appear under Wallet.</p>`;
   },
 
   support: async () => {
@@ -125,7 +170,49 @@ const pages = {
     const owed = p => led.filter(x => x.partnerId === p).reduce((a, x) => a + (x.payout || 0), 0), paid = p => pays.filter(x => x.partnerId === p).reduce((a, x) => a + x.amount, 0);
     const pn = id => esc(partners.find(p => p.id === id)?.name || id), sus = users.filter(u => u.status !== 'active' || u.flags?.length);
     const ub = (u, s, t) => `<button class="alt" data-st="${s}" data-uid="${u.id}">${t}</button>`;
-    return `<h1>Admin</h1><h2>Profit</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
+    // ---- SemaAfrica points: review, opportunities, report ----
+    const [opps, atts, pled] = await Promise.all([rows(collection(db, 'opportunities')),
+      rows(query(collection(db, 'activityAttempts'), orderBy('createdAt', 'desc'), limit(200))), rows(query(collection(db, 'pointLedger'), orderBy('createdAt', 'desc'), limit(500)))]);
+    opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    const un = id => esc(users.find(u => u.id === id)?.name || id), sum = f => users.reduce((a, u) => a + (u[f] || 0), 0);
+    const apprSince = d => pled.filter(x => x.type === 'reward_approved' && x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.approvedDelta || 0), 0);
+    const actions = a => ['started', 'pending_review'].includes(a.status) ? `<button data-ra="${a.id}" data-dec="approve">Approve</button> <button class="bad" data-ra="${a.id}" data-dec="reject">Reject</button>` : '';
+    const arow = (a, st) => `<tr><td>${when(a.createdAt)}</td><td>${un(a.uid)}</td><td>${esc(a.opportunityCode)}</td><td title="${esc(a.trackingRef)}">${esc(String(a.trackingRef || '').slice(0, 8))}…</td><td>${pts(a.rewardPoints)}</td>
+      ${st ? `<td>${stat(a.status)}</td>` : ''}<td>${a.providerEventId ? 'Yes (' + esc(a.providerEventId) + ')' : 'No'}</td><td>${esc(a.reviewNote)}</td><td>${actions(a)}</td></tr>`;
+    const queue = atts.filter(a => a.status === 'pending_review');
+    const cnt = (id, s) => atts.filter(a => a.opportunityId === id && (s === 'confirmed' ? ['pending_review', 'approved'].includes(a.status) : s === 'started' || a.status === s)).length;
+    const oc = (v, t) => `<option value="${v}" ${v === t.cur ? 'selected' : ''}>${t.l}</option>`;
+    const types = [['verified_offer', 'Verified offer'], ['signup', 'Sign-up'], ['install', 'App install'], ['survey', 'Survey'], ['permitted_click', 'Click (only if the partner explicitly pays/permits it)']];
+    const oppForm = o => `<details class="card"><summary><b>${esc(o.code)}</b> ${esc(o.title)} · ${pts(o.rewardPoints)} · ${o.cooldownMinutes} min · <span class="${o.active ? 'active' : 'suspended'}">${o.active ? 'Active' : 'Paused'}</span>
+      <span class="mute">· ${cnt(o.id, 'started')} started / ${cnt(o.id, 'confirmed')} confirmed / ${cnt(o.id, 'approved')} approved</span></summary>
+      <form class="of" data-id="${o.id}" style="max-width:520px">
+      <label>Title<input name="title" value="${esc(o.title)}" maxlength="80" required></label>
+      <label>Provider name<input name="provider" value="${esc(o.provider)}" maxlength="60"></label>
+      <label>Partner (needed for signed confirmations)<select name="partnerId"><option value="">None (manual evidence only)</option>${partners.map(p => oc(p.id, { cur: o.partnerId, l: esc(p.name) })).join('')}</select></label>
+      <label>Provider zone / reference<input name="providerZoneId" value="${esc(o.providerZoneId)}" maxlength="60"></label>
+      <label>Destination URL (https)<input name="destinationUrl" type="url" value="${esc(o.destinationUrl)}"></label>
+      <label>Tracking parameter name<input name="trackingParam" value="${esc(o.trackingParam || 'click_id')}" maxlength="30"></label>
+      <label>Activity type<select name="activityType">${types.map(([v, l]) => oc(v, { cur: o.activityType, l })).join('')}</select></label>
+      <label>Reward (points)<input name="rewardPoints" type="number" min="0" step="1" value="${+o.rewardPoints || 0}"></label>
+      <label>Cooldown (minutes)<input name="cooldownMinutes" type="number" min="1" step="1" value="${+o.cooldownMinutes || 30}"></label>
+      <label>Requirements shown to users<textarea name="requirements" rows="3" maxlength="1000">${esc(o.requirements)}</textarea></label>
+      <label><input type="checkbox" name="incentiveApproved" ${o.incentiveApproved ? 'checked' : ''}> The provider has given written permission for rewarded activity</label>
+      <label>Where is that permission recorded?<input name="providerPermissionNote" value="${esc(o.providerPermissionNote)}" maxlength="500" placeholder="e.g. email from provider, date / reference"></label>
+      <label><input type="checkbox" name="active" ${o.active ? 'checked' : ''}> Active (visible to users)</label>
+      <button>Save</button></form></details>`;
+    const pointsHtml = `<h2>Points report</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${pts(sum('pendingPoints'))}</div></div>
+      <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${pts(sum('approvedPoints'))}</div></div>
+      <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${pts(apprSince(7))}</div></div>
+      <div class="card"><div class="mute">Approved in last 30 days</div><div class="big">${pts(apprSince(30))}</div></div></div>
+      <p class="mute">Redemptions: not built yet. Opportunity counts below come from SemaAfrica's own records (latest 200 activities), not from provider reports.</p>
+      <h2>Awaiting review (provider confirmed)</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Provider event</th><th>Note</th><th></th></tr>
+      ${queue.map(a => arow(a, false)).join('') || '<tr><td colspan=8>Nothing waiting.</td></tr>'}</table></div>
+      <h2>Recent activity</h2><p class="mute">"Started" means no provider confirmation yet. Approve those only with real evidence and write what you checked in the note.</p>
+      <div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Status</th><th>Provider event</th><th>Note</th><th></th></tr>
+      ${atts.slice(0, 100).map(a => arow(a, true)).join('') || '<tr><td colspan=9>No activity yet.</td></tr>'}</table></div>
+      <h2>Opportunities (BTN001–BTN020)</h2>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
+      ${opps.map(oppForm).join('')}`;
+    return `<h1>Admin</h1>${pointsHtml}<h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
     <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
     <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>
     <h2>Withdrawal requests</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Phone</th><th>Amount</th><th>Status</th><th></th></tr>
@@ -166,11 +253,35 @@ const bind = {
       } catch (x) { if (reg && auth.currentUser) { await auth.currentUser.delete().catch(() => {}); } msg(0, err(x)); }
     };
   },
+  earn() { countdowns(); },
+  opportunity(id) {
+    const b = $('#go'); if (!b) return; countdowns();
+    const setUntil = ms => { $('#cd').dataset.until = ms; b.disabled = ms > Date.now(); countdowns(); };
+    b.onclick = async () => {
+      b.disabled = true; const w = window.open('about:blank', '_blank');   // opened first so mobile pop-up blockers allow it
+      try {
+        const r = await call('startOpportunity')({ opportunityId: id });
+        if (w) { w.opener = null; w.location.href = r.url; $('#m').innerHTML = note('Task opened in a new tab. Complete the requirements. Points show as pending once the partner confirms, then become approved after review.'); }
+        else $('#m').innerHTML = `<div class="msg"><a href="${esc(r.url)}" target="_blank" rel="noopener">Pop-up blocked: tap here to open your task</a></div>`;
+        setUntil(r.cooldownUntilMs);
+      } catch (x) { w?.close(); b.disabled = false; if (x.data?.cooldownUntilMs) setUntil(x.data.cooldownUntilMs); msg(0, err(x)); }
+    };
+  },
   task(id) { const b = $('#go'); if (b) b.onclick = async () => { try { const r = await call('startTask')({ campaignId: id }); if (r.url) window.open(r.url, '_blank', 'noopener'); msg(0, 'Task started. Complete the steps; your reward appears as pending once the partner confirms.'); b.remove(); } catch (x) { msg(0, err(x)); } }; },
   withdraw() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); try { await call('requestWithdrawal')({ amount: +f.amt.value }); location.hash = '#/withdraw'; route(); } catch (x) { msg(0, err(x)); } }; },
   support() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); await addDoc(collection(db, 'tickets'), { uid: user.uid, subject: f.s.value, message: f.m.value, createdAt: serverTimestamp(), reply: '' }); route(); }; },
   admin() {
+    if (!isAdmin) return;   // page shows 'Admins only.'; nothing to bind
     const act = fn => async e => { try { await fn(e); route(); } catch (x) { alert(err(x)); } };
+    $('#seed')?.addEventListener('click', act(() => call('adminSeedOpportunities')()));
+    app.querySelectorAll('[data-ra]').forEach(b => b.onclick = act(() => {
+      const n = prompt(b.dataset.dec === 'approve' ? 'Note (required if the partner has not confirmed: what evidence did you check?)' : 'Reason for rejecting (required)'); if (n === null) return;
+      return call('adminReviewActivity')({ attemptId: b.dataset.ra, decision: b.dataset.dec, note: n });
+    }));
+    app.querySelectorAll('.of').forEach(f => f.onsubmit = act(e => { e.preventDefault(); const v = n => f.elements[n].value;
+      return call('adminUpdateOpportunity')({ id: f.dataset.id, title: v('title'), provider: v('provider'), partnerId: v('partnerId'), providerZoneId: v('providerZoneId'), destinationUrl: v('destinationUrl'),
+        trackingParam: v('trackingParam'), activityType: v('activityType'), rewardPoints: +v('rewardPoints'), cooldownMinutes: +v('cooldownMinutes'), requirements: v('requirements'),
+        incentiveApproved: f.elements.incentiveApproved.checked, providerPermissionNote: v('providerPermissionNote'), active: f.elements.active.checked }); }));
     app.querySelectorAll('[data-w]').forEach(b => b.onclick = act(() => call('adminDecideWithdrawal')({ id: b.dataset.w, decision: b.dataset.d, note: b.dataset.d === 'mpesa' ? '' : (prompt('Note (optional, e.g. M-Pesa code)') || '') })));
     app.querySelectorAll('[data-st]').forEach(b => b.onclick = act(() => call('adminSetUserStatus')({ uid: b.dataset.uid, status: b.dataset.st })));
     app.querySelectorAll('[data-c]').forEach(b => b.onclick = act(() => updateDoc(doc(db, 'campaigns', b.dataset.c), { active: b.dataset.on === 'true' })));

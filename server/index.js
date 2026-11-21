@@ -8,8 +8,8 @@ catch (e) { console.error('No Firebase key found. On Render set the SERVICE_ACCO
 admin.initializeApp({ credential: admin.credential.cert(key) });
 const db = admin.firestore(); const FV = admin.firestore.FieldValue;
 
-const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409 };
-class HttpsError extends Error { constructor(code, msg) { super(msg); this.status = STATUS[code] || 400; } }
+const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, 'resource-exhausted': 429 };
+class HttpsError extends Error { constructor(code, msg, extra) { super(msg); this.status = STATUS[code] || 400; this.extra = extra; } }
 
 const app = express(); app.set('trust proxy', 1);
 app.use((req, _res, next) => { req.url = req.url.replace(/\/{2,}/g, '/'); next(); });   // tolerate // in URLs
@@ -26,7 +26,7 @@ const api = (name, fn) => app.post('/api/' + name, async (req, res) => {
     res.json(await fn({ auth: { uid: tok.uid, token: tok }, data: req.body || {} }));
   } catch (e) {
     if (!(e instanceof HttpsError)) { console.error(e); e = e.code?.startsWith?.('auth/') ? new HttpsError('unauthenticated', 'Session expired. Log in again.') : new HttpsError('internal', 'Server error'); e.status = e.status === 400 ? 500 : e.status; }
-    res.status(e.status).json({ error: e.message });
+    res.status(e.status).json({ error: e.message, ...(e.extra || {}) });
   }
 });
 app.get('/health', (_, r) => r.send('ok'));
@@ -47,7 +47,8 @@ api('registerProfile', async ({ auth, data }) => {
   const dupDev = await db.collection('users').where('deviceId', '==', deviceId).limit(1).get();
   const flags = dupDev.empty ? [] : ['Shared device with another account'];
   await ref.set({ name, phone, deviceId, flags, status: flags.length ? 'flagged' : 'active',
-    pending: 0, approved: 0, totalEarned: 0, createdAt: FV.serverTimestamp() });
+    pending: 0, approved: 0, totalEarned: 0,   // legacy KES balances (kept separate from points)
+    pendingPoints: 0, approvedPoints: 0, lifetimePointsEarned: 0, createdAt: FV.serverTimestamp() });
   return { ok: true };
 });
 
@@ -150,7 +151,7 @@ api('adminDecideWithdrawal', async ({ auth, data }) => {
       const r = await fetch(`${darajaBase()}/mpesa/b2c/v1/paymentrequest`, { method: 'POST',
         headers: { Authorization: 'Bearer ' + await darajaToken(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ InitiatorName: E.MPESA_INITIATOR_NAME, SecurityCredential: E.MPESA_SECURITY_CREDENTIAL, CommandID: 'BusinessPayment',
-          Amount: w.amount, PartyA: E.MPESA_SHORTCODE, PartyB: w.phone, Remarks: 'RewardHub reward', Occasion: 'RH-' + id.slice(0, 10),
+          Amount: w.amount, PartyA: E.MPESA_SHORTCODE, PartyB: w.phone, Remarks: 'SemaAfrica reward', Occasion: 'RH-' + id.slice(0, 10),
           QueueTimeOutURL: `${E.PUBLIC_URL}/mpesa/timeout?token=${E.CALLBACK_TOKEN}`, ResultURL: `${E.PUBLIC_URL}/mpesa/result?token=${E.CALLBACK_TOKEN}` }) });
       const d = await r.json();
       if (!r.ok || String(d.ResponseCode) !== '0') { await wRef.update({ status: 'submission_failed', darajaResponse: d, updatedAt: FV.serverTimestamp() }); throw new HttpsError('failed-precondition', 'Daraja rejected the request. You can retry or reject.'); }
@@ -203,9 +204,12 @@ app.post('/mpesa/:kind', async (req, res) => {
   } catch (e) { console.error('B2C callback failed', e); res.status(500).json({ ResultCode: 1, ResultDesc: 'Processing failed' }); }
 });
 
+// SemaAfrica points system (opportunities, cooldowns, review, ledger) lives in points.js
+require('./points')({ app, api, db, admin, HttpsError, uidOf, adminOnly });
+
 api('adminSetUserStatus', async ({ auth, data }) => {
   adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
   await db.doc('users/' + data.uid).update({ status: data.status }); return { ok: true };
 });
 
-app.listen(process.env.PORT || 3000, () => console.log('RewardHub server running'));
+app.listen(process.env.PORT || 3000, () => console.log('SemaAfrica server running'));
