@@ -191,14 +191,18 @@ api('adminDecideWithdrawal', async ({ auth, data }) => {
     }
   }
   if (!['paid', 'rejected'].includes(decision)) throw new HttpsError('invalid-argument', 'Bad decision');
+  const nt = String(note || '').trim().slice(0, 200);
+  if (decision === 'paid' && nt.length < 6) throw new HttpsError('invalid-argument', 'Enter the M-Pesa confirmation code before marking as paid.');
+  if (decision === 'rejected' && nt.length < 3) throw new HttpsError('invalid-argument', 'A reason is required when rejecting.');
   await db.runTransaction(async t => {
     const w = (await t.get(wRef)).data();
     if (!w || !['pending', 'submission_failed', 'submission_error', 'needs_review'].includes(w.status)) throw new HttpsError('failed-precondition', 'Already handled or still processing.');
-    if (decision === 'paid') t.update(wRef, { status: 'paid', note, decidedAt: FV.serverTimestamp() });
+    if (decision === 'paid') t.update(wRef, { status: 'paid', paidMethod: 'manual', mpesaReceipt: nt.toUpperCase(), paidBy: auth.uid, decidedAt: FV.serverTimestamp() });
     else {
-      t.update(wRef, { status: 'rejected', note, decidedAt: FV.serverTimestamp() });
+      t.update(wRef, { status: 'rejected', note: nt, decidedAt: FV.serverTimestamp() });
       refundWithdrawal(t, w, id);   // returns cash and/or points exactly as they were taken
     }
+    t.set(db.collection('adminAudit').doc(), { type: 'payment_' + decision, adminUid: auth.uid, withdrawalId: id, uid: w.uid, amount: w.amount, note: nt, createdAt: FV.serverTimestamp() });
   });
   return { ok: true };
 });
