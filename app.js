@@ -13,7 +13,7 @@ const ptsVal = n => `${pts(n)} <span class="mute" style="font-size:.9rem">≈ ${
 const RATE_NOTE = `<p class="mute">Conversion rate: <b>${PTS_PER_KES} points = KES 1</b></p>`;
 const delta = n => n ? (n > 0 ? '+' : '') + Number(n).toLocaleString() : '—';
 const STATUS_TXT = { started: 'Started', pending_review: 'Awaiting review', approved: 'Approved', rejected: 'Rejected', reversed: 'Reversed', expired: 'Expired' };
-const LEDGER_TXT = { reward_pending: 'Partner confirmed (pending)', reward_approved: 'Approved', reward_rejected: 'Rejected', reward_reversed: 'Reversed by partner', admin_adjustment: 'Adjustment' };
+const LEDGER_TXT = { reward_pending: 'Partner confirmed (pending)', reward_approved: 'Approved', reward_rejected: 'Rejected', reward_reversed: 'Reversed by partner', admin_adjustment: 'Adjustment', payment_request: 'Payment requested', payment_refund: 'Payment refunded' };
 const stat = s => `<span class="${esc(s)}">${esc(STATUS_TXT[s] || s)}</span>`;
 const left = ms => { const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}h ${m}m` : `${m}m ${String(s % 60).padStart(2, '0')}s`; };
 let timer = null;
@@ -145,8 +145,9 @@ const pages = {
 
   withdraw: async () => {
     const w = (await rows(query(collection(db, 'withdrawals'), where('uid', '==', user.uid)))).sort(byDate);
-    return `<h1>Request payment</h1>${RATE_NOTE}<form id="f"><p>Available: <b>${kes(profile?.approved)}</b><br><span class="mute">Payment is sent to ${esc(profile?.phone)} after review. Minimum KES 100.</span></p>
-    <label>Amount (KES)<input name="amt" type="number" min="100" step="1" required></label><button>Request payment</button><div id="m"></div></form>
+    const avail = Math.max(0, profile?.approved || 0) + Math.max(0, Math.floor((profile?.approvedPoints || 0) / PTS_PER_KES));   // cash balance + approved points in KES
+    return `<h1>Request payment</h1>${RATE_NOTE}<form id="f"><p>Available: <b>${kes(avail)}</b><br><span class="mute">Payment is sent to ${esc(profile?.phone)} after review. Minimum KES 100.</span></p>
+    <label>Amount (KES)<input name="amt" type="number" min="100" max="${avail}" step="1" required></label><button>Request payment</button><div id="m"></div></form>
     <h2>Your payment requests</h2><div class="scroll"><table><tr><th>Date</th><th>Amount</th><th>Status</th><th>Note</th></tr>
     ${w.map(x => `<tr><td>${when(x.createdAt)}</td><td>${kes(x.amount)}</td><td class="${x.status}">${x.status}</td><td>${esc(x.note)}</td></tr>`).join('') || '<tr><td colspan=4>None yet.</td></tr>'}</table></div>`;
   },
