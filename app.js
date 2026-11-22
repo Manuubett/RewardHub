@@ -1,5 +1,5 @@
 import { auth, db, API_URL } from './firebase-config.js';
-import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { collection, doc, getDoc, getDocs, onSnapshot, query, where, addDoc, setDoc, updateDoc, serverTimestamp, orderBy, limit } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const $ = s => document.querySelector(s), app = $('#app');
@@ -34,8 +34,22 @@ const rows = async (q) => (await getDocs(q)).docs.map(d => ({ id: d.id, ...d.dat
 const byDate = (a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0);
 const note = (m) => `<div class="msg" role="status">${esc(m)}</div>`;
 const err = e => (e.message || String(e)).replace(/^.*?: /, '');
+const AUTH_MSG = {
+  'auth/email-already-in-use': 'That email is already registered. Try logging in instead.',
+  'auth/invalid-email': 'Enter a valid email address.',
+  'auth/weak-password': 'Password is too weak. Use at least 8 characters.',
+  'auth/invalid-credential': 'Wrong email or password.',
+  'auth/wrong-password': 'Wrong email or password.',
+  'auth/user-not-found': 'Wrong email or password.',
+  'auth/too-many-requests': 'Too many attempts. Wait a few minutes and try again.',
+  'auth/network-request-failed': 'No connection. Check your internet and try again.',
+  'auth/user-disabled': 'This account is disabled. Contact support.'
+};
+const authErr = e => AUTH_MSG[e?.code] || err(e);
+const normPhone = s => { let p = String(s || '').replace(/[\s\-+]/g, ''); if (p.startsWith('0')) p = '254' + p.slice(1); return p; };
+const phoneOk = p => /^2547\d{8}$|^2541\d{8}$/.test(p);   // same rule as server.js
 const deviceId = localStorage.rh_dev || (localStorage.rh_dev = crypto.randomUUID());
-let user = null, profile = null, isAdmin = false, unsub = null;
+let user = null, profile = null, isAdmin = false, unsub = null, flash = '', registering = false;
 
 onAuthStateChanged(auth, async u => {
   user = u; unsub?.(); profile = null; isAdmin = false;
@@ -43,9 +57,9 @@ onAuthStateChanged(auth, async u => {
     // Admin = custom claim `admin: true` OR a document at admins/{uid} (same rule as the server and Firestore rules).
     isAdmin = await u.getIdTokenResult(true).then(t => t.claims.admin === true, () => false)
       || await getDoc(doc(db, 'admins', u.uid)).then(d => d.exists(), () => false);
-    unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|support|admin|task|opportunity/.test(location.hash)) route(); }, () => {});
+    unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|setup|support|admin|task|opportunity/.test(location.hash)) route(); }, e => console.error('profile listener', e));
   }
-  route();
+  if (!registering) route();
 });
 window.onhashchange = route;
 
@@ -77,16 +91,23 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
   login: () => user ? (location.hash = '#/dashboard', '') : `<h1>Welcome</h1><form id="f">
   <div id="reg" hidden><label>Full name<input name="name" autocomplete="name"></label>
   <label>M-Pesa phone (e.g. 0712345678)<input name="phone" inputmode="numeric" autocomplete="tel"></label></div>
-  <label>Email<input name="email" type="email" required autocomplete="email"></label>
-  <label>Password (6+ characters)<input name="pw" type="password" required minlength="6" autocomplete="current-password"></label>
-  <button>Log in</button> <button type="button" class="alt" id="tog">Create account instead</button><div id="m"></div></form>`,
+  <label>Email<input name="email" type="email" required autocomplete="email" autocapitalize="none"></label>
+  <label>Password<input name="pw" type="password" required autocomplete="current-password"></label>
+  <button>Log in</button> <button type="button" class="alt" id="tog">Create account instead</button>
+  <p><button type="button" class="alt" id="forgot">Forgot password?</button></p>
+  <div id="m">${flash ? note(flash) : ''}</div></form>`,
+
+  setup: () => `<h1>Finish setting up</h1><p class="mute">Your login works, but your profile was not completed. Add your details to continue.</p>
+  <form id="f"><label>Full name<input name="name" required autocomplete="name"></label>
+  <label>M-Pesa phone (e.g. 0712345678)<input name="phone" required inputmode="numeric" autocomplete="tel"></label>
+  <button>Save</button><div id="m"></div></form>`,
 
   dashboard: async () => {
     if (!profile) return note('Setting up your account…');
     const [a, t] = await Promise.all([rows(query(collection(db, 'activityAttempts'), where('uid', '==', user.uid))), rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)))]);
     const n = s => a.filter(x => x.status === s).length, m = s => t.filter(x => x.status === s).length;
     const legacy = profile.totalEarned || profile.approved || profile.pending || t.length;
-    return `<h1>Hi, ${esc(profile.name.split(' ')[0])}</h1>${profile.status !== 'active' ? note('Your account is under review. Contact Support.') : ''}
+    return `<h1>Hi, ${esc((profile.name || 'there').split(' ')[0])}</h1>${profile.status !== 'active' ? note('Your account is under review. Contact Support.') : ''}
     <div class="grid"><div class="card"><div class="mute">Approved points</div><div class="big">${ptsVal(profile.approvedPoints)}</div></div>
     <div class="card"><div class="mute">Pending (awaiting review)</div><div class="big">${ptsVal(profile.pendingPoints)}</div></div>
     <div class="card"><div class="mute">Lifetime points earned</div><div class="big">${ptsVal(profile.lifetimePointsEarned)}</div></div>
@@ -277,14 +298,52 @@ const msg = (h, t) => { const m = $('#m'); if (m) m.innerHTML = note(t); };
 const bind = {
   login() {
     let reg = false; const f = $('#f'); if (!f) return;
-    $('#tog').onclick = () => { reg = !reg; $('#reg').hidden = !reg; f.querySelector('button').textContent = reg ? 'Create account' : 'Log in'; $('#tog').textContent = reg ? 'I have an account' : 'Create account instead'; };
+    const submit = f.querySelector('button'), tog = $('#tog');
+    tog.onclick = () => {
+      reg = !reg; flash = ''; $('#m').innerHTML = ''; $('#reg').hidden = !reg;
+      submit.textContent = reg ? 'Create account' : 'Log in'; tog.textContent = reg ? 'I have an account' : 'Create account instead';
+      f.pw.autocomplete = reg ? 'new-password' : 'current-password';
+    };
+    $('#forgot').onclick = async () => {
+      const email = f.email.value.trim();
+      if (!email) return msg(0, 'Type your email above first, then tap Forgot password.');
+      try { await sendPasswordResetEmail(auth, email); } catch (x) { if (x.code !== 'auth/user-not-found') return msg(0, authErr(x)); }
+      msg(0, 'If that email has an account, a reset link is on its way. Check your spam folder too.');
+    };
     f.onsubmit = async e => {
-      e.preventDefault(); const d = Object.fromEntries(new FormData(f));
+      e.preventDefault(); flash = ''; $('#m').innerHTML = '';
+      const d = Object.fromEntries(new FormData(f)); d.email = d.email.trim().toLowerCase();
+      let phone = '';
+      if (reg) {   // validate BEFORE creating the Firebase account
+        d.name = (d.name || '').trim().replace(/\s+/g, ' '); phone = normPhone(d.phone);
+        if (d.name.length < 2) return msg(0, 'Enter your full name.');
+        if (!phoneOk(phone)) return msg(0, 'Enter a valid M-Pesa number, e.g. 0712345678.');
+        if (d.pw.length < 8) return msg(0, 'Use a password of at least 8 characters.');
+      }
+      const label = submit.textContent; submit.disabled = tog.disabled = true; submit.textContent = 'Please wait…';
+      let created = false; registering = reg;
       try {
-        if (reg) { await createUserWithEmailAndPassword(auth, d.email, d.pw); await call('registerProfile')({ name: d.name, phone: d.phone, deviceId }); }
-        else await signInWithEmailAndPassword(auth, d.email, d.pw);
-        location.hash = '#/dashboard';
-      } catch (x) { if (reg && auth.currentUser) { await auth.currentUser.delete().catch(() => {}); } msg(0, err(x)); }
+        if (reg) {
+          await createUserWithEmailAndPassword(auth, d.email, d.pw); created = true;
+          await call('registerProfile')({ name: d.name, phone, deviceId });
+        } else {
+          const c = await signInWithEmailAndPassword(auth, d.email, d.pw);
+          if (!(await getDoc(doc(db, 'users', c.user.uid))).exists()) { registering = false; location.hash = '#/setup'; return route(); }
+        }
+        registering = false; location.hash = '#/dashboard'; route();
+      } catch (x) {
+        if (created) await auth.currentUser?.delete().catch(() => {});   // only undo an account THIS attempt created
+        registering = false; flash = authErr(x);
+        submit.disabled = tog.disabled = false; submit.textContent = label; msg(0, flash);
+      }
+    };
+  },
+  setup() {
+    const f = $('#f');
+    f.onsubmit = async e => {
+      e.preventDefault(); const d = Object.fromEntries(new FormData(f)), phone = normPhone(d.phone);
+      if ((d.name || '').trim().length < 2 || !phoneOk(phone)) return msg(0, 'Enter your name and a valid M-Pesa number.');
+      try { await call('registerProfile')({ name: d.name.trim(), phone, deviceId }); location.hash = '#/dashboard'; route(); } catch (x) { msg(0, err(x)); }
     };
   },
   earn() { countdowns(); },
