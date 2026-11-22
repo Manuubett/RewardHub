@@ -1,6 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { getFirestore } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { initializeFirestore } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBDbpJNfAdmkZ-fAfGsiUYY0OWPWJ_e_IM",
@@ -13,6 +13,8 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app), db = getFirestore(app);
-// Your own server's address. Must be https:// when the site is on GitHub Pages.
+export const auth = getAuth(app);
+// Auto-detect lets Firestore fall back to long polling when the streaming connection is blocked or unstable
+export const db = initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+// Your own server's address.
 export const API_URL = 'https://rewardhub-7vgx.onrender.com';
