@@ -65,14 +65,14 @@ async function route() {
 }
 
 const pages = {
-  home: () => `<section class="hero"><h1>Earn points for sponsored tasks partners confirm.</h1>
-  <p>Open a sponsored task, complete the requirements and earn points once the partner confirms your activity and we approve it. Clicking alone never earns points.</p>
+home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idle online.</h1>
+  <p>Got internet and some free time? Visit SemaRewards, see what's new, complete sponsored tasks and earn points. Redeem your approved points to M-Pesa.</p>
   <a class="btn gold" href="#/${user ? 'earn' : 'login'}">${user ? 'See opportunities' : 'Create free account'}</a></section>
   <h2>How it works</h2><ol class="steps"><li><b>Pick an opportunity</b><br><span class="mute">Read the requirements and reward first.</span></li>
   <li><b>Complete it</b><br><span class="mute">Follow the partner's steps exactly.</span></li>
   <li><b>Confirmation and review</b><br><span class="mute">Points show as pending, then approved after review.</span></li>
-  <li><b>Request payment</b><br><span class="mute">Request payment for your approved balance. 10 points = KES 1.</span></li></ol>
-  <h2>Fair play</h2><p class="mute">One account per person and phone. Each opportunity has a waiting time before you can repeat it. Rewards the partner later reverses are removed. Accounts showing bot or duplicate activity are suspended.</p>`,
+  <li><b>Redeem to M-Pesa</b><br><span class="mute">Request payment for your approved balance. 10 points = KES 1.</span></li></ol>
+  <h2>Fair play</h2><p class="mute">Points are added only after the partner confirms your activity and we approve it. Clicking alone never earns points, and earnings are not guaranteed. One account per person and phone. Each opportunity has a waiting time before you can repeat it. Rewards the partner later reverses are removed. Accounts showing bot or duplicate activity are suspended.</p>`,
 
   login: () => user ? (location.hash = '#/dashboard', '') : `<h1>Welcome</h1><form id="f">
   <div id="reg" hidden><label>Full name<input name="name" autocomplete="name"></label>
