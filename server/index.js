@@ -7,6 +7,7 @@ try { key = process.env.SERVICE_ACCOUNT_JSON ? JSON.parse(process.env.SERVICE_AC
 catch (e) { console.error('No Firebase key found. On Render set the SERVICE_ACCOUNT_JSON environment variable to the full contents of your key file (valid JSON).'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(key) });
 const db = admin.firestore(); const FV = admin.firestore.FieldValue;
+const referrals = require('./referrals')({ db, FV });
 
 const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, 'resource-exhausted': 429, 'invalid-argument': 400, 'failed-precondition': 412, internal: 500 };
 class HttpsError extends Error { constructor(code, msg, extra) { super(msg); this.status = STATUS[code] || 400; this.extra = extra; } }
@@ -56,7 +57,7 @@ function refundWithdrawal(t, w, withdrawalId) {
 
 // Fraud #6: one phone per account; same device on another account => flagged
 api('registerProfile', async ({ auth, data }) => {
-  const uid = uidOf({ auth }); const { name, deviceId } = data; let phone = String(data.phone || '').replace(/\s+/g, '').replace(/^\+/, ''); if (phone.startsWith('0')) phone = '254' + phone.slice(1);
+  const uid = uidOf({ auth }); const { name, referralCode, deviceId } = data; let phone = String(data.phone || '').replace(/\s+/g, '').replace(/^\+/, ''); if (phone.startsWith('0')) phone = '254' + phone.slice(1);
   if (!/^2547\d{8}$|^2541\d{8}$/.test(phone || '')) throw new HttpsError('invalid-argument', 'Phone must look like 2547XXXXXXXX.');
   if (!deviceId || !name) throw new HttpsError('invalid-argument', 'Missing details.');
   const ref = db.doc('users/' + uid); if ((await ref.get()).exists) return { ok: true };
@@ -67,6 +68,7 @@ api('registerProfile', async ({ auth, data }) => {
   await ref.set({ name, phone, deviceId, flags, status: flags.length ? 'flagged' : 'active',
     pending: 0, approved: 0, totalEarned: 0,   // legacy KES balances (kept separate from points)
     pendingPoints: 0, approvedPoints: 0, lifetimePointsEarned: 0, createdAt: FV.serverTimestamp() });
+  await referrals.onRegister({ uid, referralCode, deviceId });
   return { ok: true };
 });
 
@@ -234,7 +236,7 @@ app.post('/mpesa/:kind', async (req, res) => {
 });
 
 // SemaAfrica points system (opportunities, cooldowns, review, ledger) lives in points.js
-require('./points')({ app, api, db, admin, HttpsError, uidOf, adminOnly });
+// After an admin approves an activity, check whether it completes a friend's referral const apiWithReferrals = (name, fn) => api(name, async c => {   const out = await fn(c);   if (name === 'adminReviewActivity' && c.data.decision === 'approve') {     const a = await db.doc('activityAttempts/' + c.data.attemptId).get().catch(() => null);     if (a?.exists) await referrals.onPointsApproved(a.data().uid);   }   return out; }); require('./points')({ app, api: apiWithReferrals, db, admin, HttpsError, uidOf, adminOnly }); api('getReferralCode', async ({ auth }) => ({ code: await referrals.ensureReferralCode(uidOf({ auth })) }));
 
 api('adminSetUserStatus', async ({ auth, data }) => {
   await adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
