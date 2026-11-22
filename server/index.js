@@ -236,7 +236,17 @@ app.post('/mpesa/:kind', async (req, res) => {
 });
 
 // SemaAfrica points system (opportunities, cooldowns, review, ledger) lives in points.js
-// After an admin approves an activity, check whether it completes a friend's referral const apiWithReferrals = (name, fn) => api(name, async c => {   const out = await fn(c);   if (name === 'adminReviewActivity' && c.data.decision === 'approve') {     const a = await db.doc('activityAttempts/' + c.data.attemptId).get().catch(() => null);     if (a?.exists) await referrals.onPointsApproved(a.data().uid);   }   return out; }); require('./points')({ app, api: apiWithReferrals, db, admin, HttpsError, uidOf, adminOnly }); api('getReferralCode', async ({ auth }) => ({ code: await referrals.ensureReferralCode(uidOf({ auth })) }));
+// After an admin approves an activity, check whether it completes a friend's referral
+const apiWithReferrals = (name, fn) => api(name, async c => {
+  const out = await fn(c);
+  if (name === 'adminReviewActivity' && c.data.decision === 'approve') {
+    const a = await db.doc('activityAttempts/' + c.data.attemptId).get().catch(() => null);
+    if (a?.exists) await referrals.onPointsApproved(a.data().uid);
+  }
+  return out;
+});
+require('./points')({ app, api: apiWithReferrals, db, admin, HttpsError, uidOf, adminOnly });
+api('getReferralCode', async ({ auth }) => ({ code: await referrals.ensureReferralCode(uidOf({ auth })) }));
 
 api('adminSetUserStatus', async ({ auth, data }) => {
   await adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
