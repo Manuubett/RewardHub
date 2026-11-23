@@ -3,9 +3,7 @@
 // This does NOT award points. Points still need the partner confirmation + admin review.
 const MIN = Number(process.env.VISIT_MIN_SECONDS) || 30;
 const MAX = Number(process.env.VISIT_MAX_SECONDS) || 180;
-const GATE = process.env.VISIT_GATE !== 'off';                                   // unlocking is OFF until you set VISIT_GATE=on
-const FREE = process.env.VISIT_FREE_TASKS ? +process.env.VISIT_FREE_TASKS : 1;   // tasks open from the start
-const ADULT = new Set(Array.from({ length: 6 }, (_, i) => 'BTN0' + (15 + i)));   // Tasks 15 to 20 are never locked and never needed to unlock others
+const GATE = process.env.VISIT_GATE !== 'off';   // one-task-at-a-time lock is ON unless VISIT_GATE=off
 
 module.exports = ({ api, db, FV, HttpsError, uidOf }) => {
   const ref = (uid, oid) => db.doc(`visits/${uid}_${oid}`);
@@ -33,15 +31,17 @@ module.exports = ({ api, db, FV, HttpsError, uidOf }) => {
     });
   });
 
-  // Called before startOpportunity. Rule: the first FREE tasks are open; every different task you pass opens one more.
+  // Called before startOpportunity. Rule: ONE TASK AT A TIME. While the user has an open visit for task X
+  // (started, not yet passed, still inside the MAX window), every other task is blocked until X is passed.
+  // An open visit older than MAX can no longer pass, so it stops blocking (nobody gets stuck forever).
   async function assertUnlocked(uid, oid) {
     if (!GATE) return;
-    const [os, vs] = await Promise.all([db.collection('opportunities').where('active', '==', true).get(),
-      db.collection('visits').where('uid', '==', uid).where('passed', '==', true).get()]);
-    const chain = os.docs.map(d => ({ id: d.id, ...d.data() })).filter(o => !ADULT.has(o.code)).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-    const i = chain.findIndex(o => o.id === oid); if (i < 0) return;   // adult-content or unknown tasks are not gated
-    const passed = new Set(vs.docs.map(d => d.data().opportunityId));
-    if (i >= FREE + chain.filter(o => passed.has(o.id)).length) throw new HttpsError('failed-precondition', 'This task is locked. Pass a task you have already unlocked to open the next one.');
+    const vs = await db.collection('visits').where('uid', '==', uid).where('status', '==', 'open').get();
+    const live = vs.docs.map(d => d.data()).find(v => v.opportunityId !== oid && v.startedAt && (Date.now() - v.startedAt.toMillis()) / 1000 <= MAX);
+    if (!live) return;
+    const o = await db.doc('opportunities/' + live.opportunityId).get();
+    const code = o.exists ? o.data().code : 'your current task';
+    throw new HttpsError('failed-precondition', `Finish ${code} first. Come back here and tap "I'm back: check my visit" to unlock other tasks.`);
   }
   return { assertUnlocked };
 };
