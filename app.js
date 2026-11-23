@@ -1,8 +1,12 @@
 import { auth, db, API_URL } from './firebase-config.js';
 import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { collection, doc, getDoc, getDocs, onSnapshot, query, where, addDoc, setDoc, updateDoc, serverTimestamp, orderBy, limit } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { createUserUI } from './user-ui.js';
+import { createAdminReview } from './admin-review.js';
 
 const $ = s => document.querySelector(s), app = $('#app');
+// Referral link: https://site/?ref=CODE  -> remember the code until the friend creates an account
+{ const r = new URLSearchParams(location.search).get('ref'); if (r && /^[A-Za-z0-9]{4,12}$/.test(r)) localStorage.rh_ref = r.toUpperCase(); }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const kes = n => 'KES ' + Number(n || 0).toLocaleString();
 const pts = n => Number(n || 0).toLocaleString() + ' pts';
@@ -15,16 +19,8 @@ const availKes = p => Math.max(0, p?.approved || 0) + Math.max(0, Math.floor((p?
 const RATE_NOTE = `<p class="mute">Conversion rate: <b>${PTS_PER_KES} points = KES 1</b></p>`;
 const delta = n => n ? (n > 0 ? '+' : '') + Number(n).toLocaleString() : '—';
 const STATUS_TXT = { started: 'Started', pending_review: 'Awaiting review', approved: 'Approved', rejected: 'Rejected', reversed: 'Reversed', expired: 'Expired' };
-const LEDGER_TXT = { reward_pending: 'Partner confirmed (pending)', reward_approved: 'Approved', reward_rejected: 'Rejected', reward_reversed: 'Reversed by partner', admin_adjustment: 'Adjustment', payment_request: 'Payment requested', payment_refund: 'Payment refunded' };
+const LEDGER_TXT = { reward_pending: 'Partner confirmed (pending)', reward_approved: 'Approved', reward_rejected: 'Rejected', reward_reversed: 'Reversed by partner', admin_adjustment: 'Adjustment', payment_request: 'Payment requested', payment_refund: 'Payment refunded', referral_bonus: 'Referral bonus', streak_bonus: 'Streak bonus' };
 const stat = s => `<span class="${esc(s)}">${esc(STATUS_TXT[s] || s)}</span>`;
-const left = ms => { const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}h ${m}m` : `${m}m ${String(s % 60).padStart(2, '0')}s`; };
-let timer = null;
-// Shows "Available again in ..." for every [data-until] element. The browser only DISPLAYS the cooldown; the server enforces it.
-function countdowns() {
-  clearInterval(timer); const els = [...app.querySelectorAll('[data-until]')]; if (!els.length) return;
-  const tick = () => els.forEach(el => { const ms = +el.dataset.until - Date.now(); el.textContent = ms > 0 ? 'Available again in ' + left(ms) : 'Available now'; if (ms <= 0) $('#go')?.removeAttribute('disabled'); });
-  tick(); timer = setInterval(tick, 1000);
-}
 const call = n => async d => {
   const r = await fetch(API_URL.replace(/\/+$/, '') + '/api/' + n, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await auth.currentUser.getIdToken() }, body: JSON.stringify(d || {}) });
   const j = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(j.error || 'Could not reach the server.'); e.data = j; throw e; } return j;
@@ -51,6 +47,11 @@ const phoneOk = p => /^2547\d{8}$|^2541\d{8}$/.test(p);   // same rule as server
 const deviceId = localStorage.rh_dev || (localStorage.rh_dev = crypto.randomUUID());
 let user = null, profile = null, isAdmin = false, unsub = null, flash = '', registering = false;
 
+// Earn / Opportunity / Dashboard pages (progress bars, moving cards) live in user-ui.js; the admin Review tab lives in admin-review.js.
+const UI = createUserUI({ $, app, esc, pts, ptsVal, ptsKes, kes, note, err, call, rows, byDate, when, stat, availKes, MIN_PAY, RATE_NOTE,
+  db, collection, query, where, getDoc, doc, getUser: () => user, getProfile: () => profile, route });
+const RV = createAdminReview({ $, app, esc, pts, when, stat, call, err });
+
 onAuthStateChanged(auth, async u => {
   user = u; unsub?.(); profile = null; isAdmin = false;
   if (u) {
@@ -64,7 +65,7 @@ onAuthStateChanged(auth, async u => {
 window.onhashchange = route;
 
 function nav() {
-  const L = user ? [['dashboard', 'Dashboard'], ['earn', 'Earn'], ['wallet', 'Wallet'], ['withdraw', 'Request Payment'], ['history', 'History'], ['support', 'Support']] : [['home', 'Home'], ['login', 'Log in']];
+  const L = user ? [['dashboard', 'Dashboard'], ['earn', 'Earn'], ['wallet', 'Wallet'], ['withdraw', 'Request Payment'], ['history', 'History'], ['referrals', 'Refer & Earn'], ['support', 'Support']] : [['home', 'Home'], ['login', 'Log in']];
   if (isAdmin) L.push(['admin', 'Admin']);
   const cur = location.hash.split('/')[1] || 'home';
   $('#nav').innerHTML = L.map(([k, t]) => `<a href="#/${k}" class="${cur === k ? 'on' : ''}">${t}</a>`).join('') + (user ? '<a href="#" id="out">Log out</a>' : '');
@@ -72,7 +73,7 @@ function nav() {
 }
 
 async function route() {
-  clearInterval(timer); nav(); const [, p = 'home', arg] = location.hash.split('/');
+  UI.stop(); nav(); const [, p = 'home', arg] = location.hash.split('/');
   const open = ['home', 'login'];
   if (!user && !open.includes(p)) return (location.hash = '#/login');
   try { app.innerHTML = await (pages[p] || pages.home)(arg); bind[p]?.(arg); } catch (e) { app.innerHTML = note(err(e)); }
@@ -83,13 +84,15 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
   <p>Got internet and some free time? Visit SemaRewards, see what's new, complete sponsored tasks and earn points. Redeem your approved points to M-Pesa.</p>
   <a class="btn gold" href="#/${user ? 'earn' : 'login'}">${user ? 'See opportunities' : 'Create free account'}</a></section>
   <h2>How it works</h2><ol class="steps"><li><b>Pick an opportunity</b><br><span class="mute">Read the requirements and reward first.</span></li>
-  <li><b>Complete it</b><br><span class="mute">Follow the partner's steps exactly.</span></li>
+  <li><b>Complete it</b><br><span class="mute">Follow the partner's steps exactly and wait until the page has fully loaded before you leave.</span></li>
   <li><b>Confirmation and review</b><br><span class="mute">Points show as pending, then approved after review.</span></li>
   <li><b>Redeem to M-Pesa</b><br><span class="mute">Request payment for your approved balance. 10 points = KES 1.</span></li></ol>
-  <h2>Fair play</h2><p class="mute">Points are added only after the partner confirms your activity and we approve it. Clicking alone never earns points, and earnings are not guaranteed. One account per person and phone. Each opportunity has a waiting time before you can repeat it. Rewards the partner later reverses are removed. Accounts showing bot or duplicate activity are suspended.</p>`,
+  <h2>Fair play</h2><p class="mute">Points are added only after the partner confirms your activity and we approve it. Clicking alone never earns points, and earnings are not guaranteed. One account per person and phone. Each opportunity has a waiting time before you can repeat it. Rewards the partner later reverses are removed. Accounts showing bot or duplicate activity are suspended. SemaRewards is for adults aged 18 and over, and some sponsored content from our partners may contain adult material.</p>
+  ${UI.COMMUNITY}`,
 
   login: () => user ? (location.hash = '#/dashboard', '') : `<h1>Welcome</h1><form id="f">
-  <div id="reg" hidden><label>Full name<input name="name" autocomplete="name"></label>
+  <div id="reg" hidden>${localStorage.rh_ref ? `<p class="msg">Invite code applied: <b>${esc(localStorage.rh_ref)}</b></p>` : ''}<label>Full name<input name="name" autocomplete="name"></label>
+  <p class="mute">You must be 18 or older. Some sponsored content may contain adult material.</p>
   <label>M-Pesa phone (e.g. 0712345678)<input name="phone" inputmode="numeric" autocomplete="tel"></label></div>
   <label>Email<input name="email" type="email" required autocomplete="email" autocapitalize="none"></label>
   <label>Password<input name="pw" type="password" required autocomplete="current-password"></label>
@@ -102,46 +105,10 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
   <label>M-Pesa phone (e.g. 0712345678)<input name="phone" required inputmode="numeric" autocomplete="tel"></label>
   <button>Save</button><div id="m"></div></form>`,
 
-  dashboard: async () => {
-    if (!profile) return note('Setting up your account…');
-    const [a, t] = await Promise.all([rows(query(collection(db, 'activityAttempts'), where('uid', '==', user.uid))), rows(query(collection(db, 'tasks'), where('uid', '==', user.uid)))]);
-    const n = s => a.filter(x => x.status === s).length, m = s => t.filter(x => x.status === s).length;
-    const legacy = profile.totalEarned || profile.approved || profile.pending || t.length;
-    return `<h1>Hi, ${esc((profile.name || 'there').split(' ')[0])}</h1>${profile.status !== 'active' ? note('Your account is under review. Contact Support.') : ''}
-    <div class="grid"><div class="card"><div class="mute">Approved points</div><div class="big">${ptsVal(profile.approvedPoints)}</div></div>
-    <div class="card"><div class="mute">Pending (awaiting review)</div><div class="big">${ptsVal(profile.pendingPoints)}</div></div>
-    <div class="card"><div class="mute">Lifetime points earned</div><div class="big">${ptsVal(profile.lifetimePointsEarned)}</div></div>
-    <div class="card"><div class="mute">Activities approved / awaiting review / rejected</div><div class="big">${n('approved')} / ${n('pending_review')} / ${n('rejected') + n('reversed')}</div></div></div>
-    ${RATE_NOTE}<p><a class="btn gold" href="#/earn">Find an opportunity</a></p>
-    ${legacy ? `<h2>Cash balance (earlier tasks)</h2><div class="grid"><div class="card"><div class="mute">Available</div><div class="big">${kes(profile.approved)}</div></div>
-    <div class="card"><div class="mute">Pending partner confirmation</div><div class="big">${kes(profile.pending)}</div></div>
-    <div class="card"><div class="mute">Total earned</div><div class="big">${kes(profile.totalEarned)}</div></div>
-    <div class="card"><div class="mute">Tasks approved / pending / reversed</div><div class="big">${m('approved')} / ${m('pending')} / ${m('reversed')}</div></div></div>` : ''}`;
-  },
-
-  earn: async () => {
-    const [opps, cds, c] = await Promise.all([rows(query(collection(db, 'opportunities'), where('active', '==', true))),
-      rows(query(collection(db, 'cooldowns'), where('uid', '==', user.uid))), rows(query(collection(db, 'campaigns'), where('active', '==', true)))]);
-    opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-    const until = Object.fromEntries(cds.map(x => [x.opportunityId, x.cooldownUntil?.toMillis?.() || 0]));
-    return `<h1>Opportunities</h1>${RATE_NOTE}` + (opps.length ? `<div class="grid">${opps.map(x => `<div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span><br><b>${esc(x.title)}</b>
-    <div class="big">${ptsVal(x.rewardPoints)}</div><div class="mute">After partner confirmation and review · repeat every ${x.cooldownMinutes} min</div>
-    <div class="mute" data-until="${until[x.id] || 0}"></div>
-    <p><a class="btn" href="#/opportunity/${esc(x.id)}">View details</a></p></div>`).join('')}</div>` : note('No opportunities right now. Check back soon.'))
-    + (c.length ? `<h2>Cash tasks (KES)</h2><div class="grid">${c.map(x => `<div class="card"><b>${esc(x.title)}</b>
-    <div class="big">${kes(x.reward)}</div><div class="mute">${x.type === 'cpc' ? 'Paid for a valid click' : 'Paid on completed action'}</div>
-    <p><a class="btn" href="#/task/${x.id}">View details</a></p></div>`).join('')}</div>` : '');
-  },
-
-  opportunity: async id => {
-    const o = await getDoc(doc(db, 'opportunities', id)); if (!o.exists() || !o.data().active) return note('This opportunity is not available.');
-    const x = o.data(), c = await getDoc(doc(db, 'cooldowns', `${user.uid}_${id}`)), until = c.exists() ? c.data().cooldownUntil?.toMillis?.() || 0 : 0;
-    return `<h1>${esc(x.title)}</h1><div class="card"><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span>
-    <div class="big">${ptsVal(x.rewardPoints)}</div><h2>Requirements</h2><p style="white-space:pre-wrap">${esc(x.requirements)}</p>
-    <p class="mute">Points are added only after the partner confirms your activity and SemaAfrica approves it. Opening the link on its own does not earn points. You can repeat this every ${x.cooldownMinutes} minutes.</p>
-    <p class="mute" id="cd" data-until="${until}"></p>
-    <button id="go" ${until > Date.now() ? 'disabled' : ''}>Open sponsored task</button><div id="m"></div></div>`;
-  },
+  dashboard: UI.dashboard,
+  earn: UI.earn,
+  opportunity: UI.opportunity,
+  referrals: UI.referrals,
 
   task: async id => {
     const c = await getDoc(doc(db, 'campaigns', id)); if (!c.exists()) return note('Task not found.');
@@ -149,6 +116,7 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
     return `<h1>${esc(x.title)}</h1><div class="card"><div class="big">${kes(x.reward)}</div>
     <h2>Requirements</h2><p style="white-space:pre-wrap">${esc(x.requirements)}</p>
     <p class="mute">Reward stays pending until the advertiser confirms. Reversed conversions are deducted.</p>
+    ${UI.WAIT_RULE}${UI.ADULT_NOTICE}
     ${t.exists() ? `<p>Your status: <b class="${t.data().status}">${t.data().status}</b></p>` : `<button id="go" data-id="${id}">Start task</button>`}<div id="m"></div></div>`;
   },
 
@@ -207,15 +175,13 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
     const pn = id => esc(partners.find(p => p.id === id)?.name || id), sus = users.filter(u => u.status !== 'active' || u.flags?.length);
     const ub = (u, s, t) => `<button class="alt" data-st="${s}" data-uid="${u.id}">${t}</button>`;
     // ---- SemaAfrica points: review, opportunities, report ----
-    const [opps, atts, pled] = await Promise.all([rows(collection(db, 'opportunities')),
-      rows(query(collection(db, 'activityAttempts'), orderBy('createdAt', 'desc'), limit(200))), rows(query(collection(db, 'pointLedger'), orderBy('createdAt', 'desc'), limit(500)))]);
+    const [opps, atts, pled, waiting] = await Promise.all([rows(collection(db, 'opportunities')),
+      rows(query(collection(db, 'activityAttempts'), orderBy('createdAt', 'desc'), limit(200))), rows(query(collection(db, 'pointLedger'), orderBy('createdAt', 'desc'), limit(500))),
+      rows(query(collection(db, 'activityAttempts'), where('status', 'in', ['pending_review', 'started']), limit(500)))]);   // everything still waiting, not only the latest 200
     opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-    const un = id => esc(users.find(u => u.id === id)?.name || id), sum = f => users.reduce((a, u) => a + (u[f] || 0), 0);
+    const sum = f => users.reduce((a, u) => a + (u[f] || 0), 0);
     const apprSince = d => pled.filter(x => x.type === 'reward_approved' && x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.approvedDelta || 0), 0);
-    const actions = a => ['started', 'pending_review'].includes(a.status) ? `<button data-ra="${a.id}" data-dec="approve">Approve</button> <button class="bad" data-ra="${a.id}" data-dec="reject">Reject</button>` : '';
-    const arow = (a, st) => `<tr><td>${when(a.createdAt)}</td><td>${un(a.uid)}</td><td>${esc(a.opportunityCode)}</td><td title="${esc(a.trackingRef)}">${esc(String(a.trackingRef || '').slice(0, 8))}…</td><td>${pts(a.rewardPoints)}</td>
-      ${st ? `<td>${stat(a.status)}</td>` : ''}<td>${a.providerEventId ? 'Yes (' + esc(a.providerEventId) + ')' : 'No'}</td><td>${esc(a.reviewNote)}</td><td>${actions(a)}</td></tr>`;
-    const queue = atts.filter(a => a.status === 'pending_review');
+    const queue = waiting;
     const cnt = (id, s) => atts.filter(a => a.opportunityId === id && (s === 'confirmed' ? ['pending_review', 'approved'].includes(a.status) : s === 'started' || a.status === s)).length;
     const oc = (v, t) => `<option value="${v}" ${v === t.cur ? 'selected' : ''}>${t.l}</option>`;
     const types = [['verified_offer', 'Verified offer'], ['signup', 'Sign-up'], ['install', 'App install'], ['survey', 'Survey'], ['permitted_click', 'Click (only if the partner explicitly pays/permits it)']];
@@ -259,16 +225,12 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
       <h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
       <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
       <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>`;
-    S.review = `<h1>Review</h1><h2>Awaiting review (provider confirmed)</h2><div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Provider event</th><th>Note</th><th></th></tr>
-      ${queue.map(a => arow(a, false)).join('') || '<tr><td colspan=8>Nothing waiting.</td></tr>'}</table></div>
-      <h2>Recent activity</h2><p class="mute">"Started" means no provider confirmation yet. Approve those only with real evidence and write what you checked in the note.</p>
-      <div class="scroll"><table><tr><th>When</th><th>User</th><th>Code</th><th>Ref</th><th>Points</th><th>Status</th><th>Provider event</th><th>Note</th><th></th></tr>
-      ${atts.slice(0, 100).map(a => arow(a, true)).join('') || '<tr><td colspan=9>No activity yet.</td></tr>'}</table></div>`;
+    S.review = RV.html(users, waiting, atts.filter(a => !['started', 'pending_review'].includes(a.status)));
     S.payments = `<h1>Payments</h1><h2>Payments to make (${toPay.length})</h2><p class="mute">Send the money manually from M-Pesa to the number shown, then press <b>Mark as paid</b> and enter the M-Pesa confirmation code. Reject refunds the user's balance.</p>
       ${toPay.map(payCard).join('') || '<p class="mute">No payment requests waiting.</p>'}
       <h2>Payment history</h2><div class="scroll"><table><tr><th>Requested</th><th>Name</th><th>M-Pesa number</th><th>Amount</th><th>Status</th><th>M-Pesa code / note</th></tr>
       ${done.map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(local(w.phone))}</td><td>${kes(w.amount)}</td><td class="${esc(w.status)}">${esc(w.status)}</td><td>${esc(w.mpesaReceipt || w.note || '')}</td></tr>`).join('') || '<tr><td colspan=6>None yet.</td></tr>'}</table></div>`;
-    S.opportunities = `<h1>Opportunities</h1><p class="mute">BTN001–BTN020. Tap one to edit it.</p>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
+    S.opportunities = `<h1>Opportunities</h1><p class="mute">${opps.length} opportunities. Tap one to edit it. New ones start paused: fill in the URL, reward and requirements, then tick Active.</p><p><button id="addbtn">Add a new BTN</button></p>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
       ${opps.map(oppForm).join('')}`;
     S.users = `<h1>Users</h1><h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
       ${sus.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${esc(u.status)}">${esc(u.status)}</td><td>${esc((u.flags || []).join(', '))}</td><td>${ub(u, 'suspended', 'Suspend')} ${ub(u, 'active', 'Clear')}</td></tr>`).join('') || '<tr><td colspan=5>Nothing flagged.</td></tr>'}</table></div>
@@ -288,7 +250,10 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
       ${camps.map(c => `<tr><td>${esc(c.title)}</td><td>${pn(c.partnerId)}</td><td>${kes(c.reward)}</td><td>${c.active}</td><td><button class="alt" data-c="${c.id}" data-on="${!c.active}">${c.active ? 'Pause' : 'Resume'}</button></td></tr>`).join('') || '<tr><td colspan=5>No campaigns yet.</td></tr>'}</table></div>`;
     S.support = `<h1>Support tickets</h1>${tix.sort(byDate).map(t => `<div class="card" style="margin:.7rem 0"><b>${esc(t.subject)}</b> <span class="mute">${esc(users.find(u => u.id === t.uid)?.name)}</span><p>${esc(t.message)}</p>
       <form class="wide rf row" data-t="${t.id}"><input name="r" value="${esc(t.reply || '')}" placeholder="Reply"><button>Reply</button></form></div>`).join('') || '<p class="mute">No tickets.</p>'}`;
-    const tabs = [['overview', 'Overview', 0], ['review', 'Review', queue.length], ['payments', 'Payments', toPay.length], ['opportunities', 'Opportunities', 0], ['users', 'Users', sus.length], ['partners', 'Partners', 0], ['campaigns', 'Campaigns', 0], ['support', 'Support', attention[2][1]]];
+    S.top = `<h1>Top users</h1><p class="mute">Ranked by <b>approved</b> points only (reviewed and partner-confirmed). Flagged and suspended accounts are left out, and names are shortened. Only share names of members who are comfortable with it.</p>
+      <div class="chips" id="topchips"><button type="button" data-p="week" class="on">This week</button><button type="button" data-p="month" class="alt">This month</button><button type="button" data-p="all" class="alt">All time</button></div>
+      <div id="topbox"><p class="mute">Loading…</p></div>`;
+    const tabs = [['overview', 'Overview', 0], ['review', 'Review', queue.length], ['payments', 'Payments', toPay.length], ['top', 'Top users', 0], ['opportunities', 'Opportunities', 0], ['users', 'Users', sus.length], ['partners', 'Partners', 0], ['campaigns', 'Campaigns', 0], ['support', 'Support', attention[2][1]]];
     const cur = S[tab] ? tab : 'overview';
     return `<div class="admin"><aside class="side"><div class="side-h">Admin</div><nav>${tabs.map(([k, l, n]) => `<a href="#/admin/${k}" class="${k === cur ? 'on' : ''}">${l}${n ? `<span class="badge">${n}</span>` : ''}</a>`).join('')}</nav></aside><section class="panel">${S[cur]}</section></div>`;
   }
@@ -325,7 +290,7 @@ const bind = {
       try {
         if (reg) {
           await createUserWithEmailAndPassword(auth, d.email, d.pw); created = true;
-          await call('registerProfile')({ name: d.name, phone, deviceId });
+          await call('registerProfile')({ name: d.name, phone, deviceId, referralCode: localStorage.rh_ref || '' }); localStorage.removeItem('rh_ref');
         } else {
           const c = await signInWithEmailAndPassword(auth, d.email, d.pw);
           if (!(await getDoc(doc(db, 'users', c.user.uid))).exists()) { registering = false; location.hash = '#/setup'; return route(); }
@@ -343,24 +308,14 @@ const bind = {
     f.onsubmit = async e => {
       e.preventDefault(); const d = Object.fromEntries(new FormData(f)), phone = normPhone(d.phone);
       if ((d.name || '').trim().length < 2 || !phoneOk(phone)) return msg(0, 'Enter your name and a valid M-Pesa number.');
-      try { await call('registerProfile')({ name: d.name.trim(), phone, deviceId }); location.hash = '#/dashboard'; route(); } catch (x) { msg(0, err(x)); }
+      try { await call('registerProfile')({ name: d.name.trim(), phone, deviceId, referralCode: localStorage.rh_ref || '' }); localStorage.removeItem('rh_ref'); location.hash = '#/dashboard'; route(); } catch (x) { msg(0, err(x)); }
     };
   },
-  earn() { countdowns(); },
-  opportunity(id) {
-    const b = $('#go'); if (!b) return; countdowns();
-    const setUntil = ms => { $('#cd').dataset.until = ms; b.disabled = ms > Date.now(); countdowns(); };
-    b.onclick = async () => {
-      b.disabled = true; const w = window.open('about:blank', '_blank');   // opened first so mobile pop-up blockers allow it
-      try {
-        const r = await call('startOpportunity')({ opportunityId: id });
-        if (w) { w.opener = null; w.location.href = r.url; $('#m').innerHTML = note('Task opened in a new tab. Complete the requirements. Points show as pending once the partner confirms, then become approved after review.'); }
-        else $('#m').innerHTML = `<div class="msg"><a href="${esc(r.url)}" target="_blank" rel="noopener">Pop-up blocked: tap here to open your task</a></div>`;
-        setUntil(r.cooldownUntilMs);
-      } catch (x) { w?.close(); b.disabled = false; if (x.data?.cooldownUntilMs) setUntil(x.data.cooldownUntilMs); msg(0, err(x)); }
-    };
-  },
-  task(id) { const b = $('#go'); if (b) b.onclick = async () => { try { const r = await call('startTask')({ campaignId: id }); if (r.url) window.open(r.url, '_blank', 'noopener'); msg(0, 'Task started. Complete the steps; your reward appears as pending once the partner confirms.'); b.remove(); } catch (x) { msg(0, err(x)); } }; },
+  dashboard: UI.bindDashboard,
+  earn: UI.bindEarn,
+  opportunity: UI.bindOpportunity,
+  referrals: UI.bindReferrals,
+  task(id) { const b = $('#go'); if (b) b.onclick = async () => { try { const r = await call('startTask')({ campaignId: id }); if (r.url) window.open(r.url, '_blank', 'noopener'); msg(0, 'Task started. Wait until the page has fully loaded, then come back to begin another task. If you leave early, your points will not be approved.'); b.remove(); } catch (x) { msg(0, err(x)); } }; },
   withdraw() {
     const f = $('#f'), btn = $('#req'), max = availKes(profile);
     // Button stays inactive unless the amount is a whole number between KES 100 and the available balance
@@ -378,10 +333,34 @@ const bind = {
     const F = id => $(id) || {};   // forms exist only on some tabs
     const act = fn => async e => { try { await fn(e); route(); } catch (x) { alert(err(x)); } };
     $('#seed')?.addEventListener('click', act(() => call('adminSeedOpportunities')()));
-    app.querySelectorAll('[data-ra]').forEach(b => b.onclick = act(() => {
-      const n = prompt(b.dataset.dec === 'approve' ? 'Note (required if the partner has not confirmed: what evidence did you check?)' : 'Reason for rejecting (required)'); if (n === null) return;
-      return call('adminReviewActivity')({ attemptId: b.dataset.ra, decision: b.dataset.dec, note: n });
-    }));
+    $('#addbtn')?.addEventListener('click', act(async () => { const r = await call('adminAddOpportunity')(); alert(`Created ${r.code} (paused). Open it, fill in the URL, reward and requirements, then tick Active.`); }));
+    if ($('#topbox')) {   // Top users tab: analyse, show the best user, build a WhatsApp message
+      const medals = ['🥇', '🥈', '🥉'], names = { week: 'this week', month: 'this month', all: 'of all time' };
+      const load = async period => {
+        $('#topbox').innerHTML = '<p class="mute">Analysing…</p>';
+        try {
+          const r = await call('adminTopUsers')({ period }), b = r.board;
+          if (!b.length) { $('#topbox').innerHTML = note('No approved activity for this period yet.'); return; }
+          const top = b[0], link = location.origin + location.pathname;
+          const text = `🏆 SemaRewards top earners ${names[period]}\n\n` + b.slice(0, 5).map((u, i) => `${medals[i] || (i + 1) + '.'} ${u.name} · ${u.points.toLocaleString()} pts${u.activities != null ? ` · ${u.activities} tasks` : ''}`).join('\n')
+            + `\n\nCongratulations! 🎉 You could be on the next list. Join SemaRewards: ${link}\n\nPoints are paid only after partner confirmation and review. Earnings are not guaranteed. 18+ only.`;
+          $('#topbox').innerHTML = `<div class="hero-card"><div><div class="hc-label">Best overall user ${names[period]}</div><div class="hc-big">${esc(top.name)}</div>
+            <div class="hc-sub">${pts(top.points)} · ≈ ${ptsKes(top.points)}${top.activities != null ? ` · ${top.activities} approved tasks` : ''}${top.streak ? ` · 🔥 ${top.streak}-day streak` : ''}</div></div></div>
+            ${period === 'all' ? '' : `<div class="grid kpis"><div class="card kpi"><div class="mute">Active earners</div><div class="kv">${r.participants}</div></div><div class="card kpi"><div class="mute">Points approved</div><div class="kv">${pts(r.totalPoints)}</div></div></div>`}
+            ${r.truncated ? note('Very busy period: only the latest 10,000 point entries were analysed, so totals may be slightly low.') : ''}
+            <div class="scroll"><table><tr><th>#</th><th>User</th><th>Points</th><th>Tasks</th><th>Streak</th></tr>
+            ${b.map((u, i) => `<tr><td>${medals[i] || i + 1}</td><td>${esc(u.name)}</td><td>${pts(u.points)}</td><td>${u.activities ?? '—'}</td><td>${u.streak || '—'}</td></tr>`).join('')}</table></div>
+            <h2>WhatsApp message</h2><textarea id="topmsg" rows="9" class="wide" aria-label="WhatsApp message"></textarea>
+            <div class="acts"><button class="gold" id="topcopy" type="button">Copy message</button><button id="topwa" type="button">Share on WhatsApp</button></div>`;
+          $('#topmsg').value = text;
+          $('#topcopy').onclick = () => navigator.clipboard?.writeText($('#topmsg').value).then(() => { $('#topcopy').textContent = 'Copied ✓'; }, () => {});
+          $('#topwa').onclick = () => window.open('https://wa.me/?text=' + encodeURIComponent($('#topmsg').value), '_blank', 'noopener');
+        } catch (x) { $('#topbox').innerHTML = note(err(x)); }
+      };
+      $('#topchips').querySelectorAll('button').forEach(b => b.onclick = () => { $('#topchips').querySelectorAll('button').forEach(o => o.className = o === b ? 'on' : 'alt'); load(b.dataset.p); });
+      load('week');
+    }
+    RV.bind();   // Review tab: search, filters, approve / reject, approve all per user
     app.querySelectorAll('.of').forEach(f => f.onsubmit = act(e => { e.preventDefault(); const v = n => f.elements[n].value;
       return call('adminUpdateOpportunity')({ id: f.dataset.id, title: v('title'), provider: v('provider'), partnerId: v('partnerId'), providerZoneId: v('providerZoneId'), destinationUrl: v('destinationUrl'),
         trackingParam: v('trackingParam'), activityType: v('activityType'), rewardPoints: +v('rewardPoints'), cooldownMinutes: +v('cooldownMinutes'), requirements: v('requirements'),
