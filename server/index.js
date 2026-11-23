@@ -8,6 +8,7 @@ catch (e) { console.error('No Firebase key found. On Render set the SERVICE_ACCO
 admin.initializeApp({ credential: admin.credential.cert(key) });
 const db = admin.firestore(); const FV = admin.firestore.FieldValue;
 const referrals = require('./referrals')({ db, FV });
+const streaks = require('./streak')({ db, FV });   // daily streak + 7-day bonus (server-side)
 
 const STATUS = { unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, 'resource-exhausted': 429, 'invalid-argument': 400, 'failed-precondition': 412, internal: 500 };
 class HttpsError extends Error { constructor(code, msg, extra) { super(msg); this.status = STATUS[code] || 400; this.extra = extra; } }
@@ -242,6 +243,7 @@ const apiWithReferrals = (name, fn) => api(name, async c => {
   if (name === 'adminReviewActivity' && c.data.decision === 'approve') {
     const a = await db.doc('activityAttempts/' + c.data.attemptId).get().catch(() => null);
     if (a?.exists) await referrals.onPointsApproved(a.data().uid);
+    try { await streaks.onApproved(c.data.attemptId); } catch (e) { console.error('streak', e); }   // never fail an approval because of this
   }
   return out;
 });
