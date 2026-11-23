@@ -65,7 +65,7 @@ export function createUserUI(c) {
   let E = { opps: [], passed: new Set(), until: {}, moved: null };
 
   // ---------- Visit-time check: the SERVER measures the time; this page only says "I'm back" ----------
-  let GATE_ON = false, FREE_TASKS = 3;   // read from the server (visitConfig) every time the Earn page loads, so they can never drift apart
+  const GATE_ON = true, FREE_TASKS = 1;   // keep in sync with VISIT_GATE=on and VISIT_FREE_TASKS on the server
   const lockedIds = () => {
     if (!GATE_ON) return new Set();
     const ch = E.opps.filter(x => !ADULT_CODES.includes(x.code)), done = ch.filter(x => E.passed.has(x.id)).length;
@@ -79,17 +79,15 @@ export function createUserUI(c) {
   const say = h => { const el = $('#em') || $('#m'); if (el) el.innerHTML = h; else app.insertAdjacentHTML('afterbegin', h);
     $('#vretry')?.addEventListener('click', retryVisit); $('#vcheck')?.addEventListener('click', checkReturn); };
   const loadV = () => { try { return JSON.parse(sessionStorage.rh_visit || 'null'); } catch { return null; } };
-  const showWaiting = ok => say(ok === false ? note(TASK_OPENED) : note(TASK_OPENED) + WAIT_BOX);   // no "I'm back" button when the server did not record the visit
-  let retryInfo = null;   // kept in memory so "Try again" still works after the server has closed the visit
+  const showWaiting = () => say(note(TASK_OPENED) + WAIT_BOX);
   async function beginVisit(id, url) {
-    try { await call('startVisit')({ opportunityId: id }); } catch (e) { console.error('startVisit', e); return false; }
+    try { await call('startVisit')({ opportunityId: id }); } catch (e) { console.error('startVisit', e); return; }
     sessionStorage.rh_visit = JSON.stringify({ id, url, t: Date.now() });
-    return true;
   }
   async function retryVisit() {
-    const p = retryInfo || loadV(); if (!p) return;
+    const p = loadV(); if (!p) return;
     const w = window.open('about:blank', '_blank');
-    try { const ok = await beginVisit(p.id, p.url); if (w) { w.opener = null; w.location.href = p.url; } showWaiting(ok); }
+    try { await beginVisit(p.id, p.url); if (w) { w.opener = null; w.location.href = p.url; } showWaiting(); }
     catch (x) { w?.close(); say(note(err(x))); }
   }
   let checking = false;
@@ -103,7 +101,7 @@ export function createUserUI(c) {
         sessionStorage.removeItem('rh_visit');
         if (location.hash.startsWith('#/earn')) await route();   // repaint so the next task unlocks
         say(note('Time requirement met! You can continue.'));
-      } else { retryInfo = p; say(retryBox(r.result === 'too_fast' ? 'Too fast! Please try again.' : 'Time exceeded. Please try again, or contact Support for a review.')); }
+      } else say(retryBox(r.result === 'too_fast' ? 'Too fast! Please try again.' : 'Time exceeded. Please try again, or contact Support for a review.'));
     } catch (x) { say(note(err(x))); } finally { checking = false; }
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReturn(); });
@@ -134,7 +132,7 @@ export function createUserUI(c) {
     const em = $('#em');
     try {
       const r = await call('startOpportunity')({ opportunityId: id });
-      if (w) { w.opener = null; const ok = await beginVisit(id, r.url); w.location.href = r.url; showWaiting(ok); }
+      if (w) { w.opener = null; await beginVisit(id, r.url); w.location.href = r.url; showWaiting(); }
       else em.innerHTML = `<div class="msg"><a href="${esc(r.url)}" target="_blank" rel="noopener">Pop-up blocked: tap here to open your task</a></div>`;
       E.until[id] = r.cooldownUntilMs; E.moved = id;
       btn.closest('.card')?.classList.add('leave');          // fade the card out, then it reappears in "Waiting for timer"
@@ -147,16 +145,11 @@ export function createUserUI(c) {
   }
   const earn = async () => {
     const user = getUser();
-    const [opps, cds, camps, vis, cfg, atts] = await Promise.all([rows(query(collection(db, 'opportunities'), where('active', '==', true))),
+    const [opps, cds, camps, vis] = await Promise.all([rows(query(collection(db, 'opportunities'), where('active', '==', true))),
       rows(query(collection(db, 'cooldowns'), where('uid', '==', user.uid))), rows(query(collection(db, 'campaigns'), where('active', '==', true))),
-      rows(query(collection(db, 'visits'), where('uid', '==', user.uid), where('passed', '==', true))).catch(() => null),
-      call('visitConfig')().catch(() => null), rows(query(collection(db, 'activityAttempts'), where('uid', '==', user.uid))).catch(() => [])]);
-    if (cfg) { GATE_ON = !!cfg.gate; FREE_TASKS = +cfg.free || 3; }
-    if (vis === null) GATE_ON = false;   // cannot read passes (rule missing?): show everything; the server still enforces the lock
-    opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0) || String(a.code).localeCompare(String(b.code)));
-    const passed = new Set((vis || []).map(v => v.opportunityId)), byCode = new Map(opps.map(o => [o.code, o.id]));
-    atts.filter(a => ['approved', 'pending_review'].includes(a.status)).forEach(a => { const id = a.opportunityId || byCode.get(a.opportunityCode); if (id) passed.add(id); });   // earlier work counts (grandfathered)
-    E = { opps, passed, until: Object.fromEntries(cds.map(x => [x.opportunityId, x.cooldownUntil?.toMillis?.() || 0])), moved: null };
+      rows(query(collection(db, 'visits'), where('uid', '==', user.uid), where('passed', '==', true))).catch(() => [])]);
+    opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    E = { opps, passed: new Set(vis.map(v => v.opportunityId)), until: Object.fromEntries(cds.map(x => [x.opportunityId, x.cooldownUntil?.toMillis?.() || 0])), moved: null };
     return `<h1>Opportunities</h1>${RATE_NOTE}${WAIT_RULE}${ADULT_NOTICE}<div id="em"></div><div id="earnbox">${earnBox()}</div>${COMMUNITY}` +
       (camps.length ? `<h2>Cash tasks (KES)</h2><div class="grid">${camps.map(x => `<div class="card"><b>${esc(x.title)}</b>
       <div class="big">${kes(x.reward)}</div><div class="mute">${x.type === 'cpc' ? 'Paid for a valid click' : 'Paid on completed action'}</div>
@@ -184,7 +177,7 @@ export function createUserUI(c) {
       b.disabled = true; const w = window.open('about:blank', '_blank');
       try {
         const r = await call('startOpportunity')({ opportunityId: id });
-        if (w) { w.opener = null; const ok = await beginVisit(id, r.url); w.location.href = r.url; showWaiting(ok); }
+        if (w) { w.opener = null; await beginVisit(id, r.url); w.location.href = r.url; showWaiting(); }
         else $('#m').innerHTML = `<div class="msg"><a href="${esc(r.url)}" target="_blank" rel="noopener">Pop-up blocked: tap here to open your task</a></div>`;
         setUntil(r.cooldownUntilMs);
       } catch (x) { w?.close(); b.disabled = false; if (x.data?.cooldownUntilMs) setUntil(x.data.cooldownUntilMs); msg(err(x)); }
