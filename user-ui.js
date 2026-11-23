@@ -67,17 +67,47 @@ export function createUserUI(c) {
   // ---------- Visit-time check: the SERVER measures the time; this page only says "I'm back" ----------
   const VISIT_MAX_MS = 180000;   // keep in sync with VISIT_MAX_SECONDS on the server (default 180)
   const activeVisit = () => { const v = loadV(); return v && Date.now() - v.t <= VISIT_MAX_MS ? v : null; };   // task started but not yet passed
-  const WAIT_BOX = `<div class="msg" role="status">⏱ Visit started. Stay on the partner page until it has loaded, then come back here.
-    <p class="acts"><button id="vcheck" type="button" class="alt">I'm back: check my visit</button></p></div>`;
-  const retryBox = t => `<div class="msg" role="status"><b>${esc(t)}</b><p class="acts"><button id="vretry" type="button">Try again</button></p></div>`;
-  const say = h => { const el = $('#em') || $('#m'); if (el) el.innerHTML = h; else app.insertAdjacentHTML('afterbegin', h);
-    $('#vretry')?.addEventListener('click', retryVisit); $('#vcheck')?.addEventListener('click', checkReturn); };
+  // ---------- Centered "I'm back" modal: shown while a task is in progress, gone once the visit passes ----------
+  if (!document.getElementById('vmodal-css')) document.head.insertAdjacentHTML('beforeend', `<style id="vmodal-css">
+    #vmodal{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;background:rgba(8,28,24,.72);backdrop-filter:blur(3px);animation:vfade .25s ease}
+    #vmodal .vbox{background:var(--card,#fff);color:var(--ink,#0b3d34);border-radius:18px;max-width:420px;width:100%;padding:1.6rem 1.4rem;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.35);animation:vpop .4s cubic-bezier(.2,1.2,.4,1)}
+    #vmodal h2{margin:.2rem 0 .4rem}#vmodal p{margin:.3rem 0 1rem;line-height:1.45}
+    #vmodal .vspin{width:62px;height:62px;margin:0 auto 1rem;border-radius:50%;border:5px solid rgba(127,127,127,.25);border-top-color:var(--ink,#0b3d34);animation:vrot 1s linear infinite}
+    #vmodal .vwarn{font-size:2.4rem;line-height:62px;margin:0 auto 1rem;height:62px}
+    #vmodal .vgo{font-size:1.05rem;padding:.9rem 1.6rem;width:100%;animation:vpulse 1.6s ease-in-out infinite}
+    #vmodal .vgo:disabled{animation:none}
+    #vmodal .vskip{display:block;margin:.9rem auto 0;background:none;border:0;color:inherit;opacity:.7;text-decoration:underline;cursor:pointer;font-size:.9rem}
+    @keyframes vfade{from{opacity:0}to{opacity:1}}@keyframes vpop{from{transform:scale(.85) translateY(12px);opacity:0}to{transform:none;opacity:1}}
+    @keyframes vrot{to{transform:rotate(360deg)}}
+    @keyframes vpulse{0%,100%{box-shadow:0 0 0 0 rgba(242,169,0,.6);transform:scale(1)}50%{box-shadow:0 0 0 16px rgba(242,169,0,0);transform:scale(1.03)}}
+    @media(prefers-reduced-motion:reduce){#vmodal,#vmodal *{animation:none!important}}</style>`);
+  let vErr = null, vShown = '';   // vErr: 'too_fast' | 'too_slow' while the user must retry; vShown: what is painted (avoids repainting every tick)
+  function syncVisitModal() {
+    const act = activeVisit(), key = vErr ? 'e:' + vErr : act ? 'w:' + act.id + ':' + act.t : '';
+    if (key === vShown) return;
+    const wasWaiting = vShown.startsWith('w:'); vShown = key;
+    let m = document.getElementById('vmodal');
+    if (!key) { m?.remove(); if (wasWaiting && location.hash.startsWith('#/earn')) paintEarn(); return; }   // window ended: cards go back to normal
+    if (!m) { m = document.createElement('div'); m.id = 'vmodal'; document.body.appendChild(m); }
+    const p = loadV(), cur = p && E.opps.find(x => x.id === p.id), code = cur ? esc(cur.code) : 'your task';
+    m.innerHTML = vErr
+      ? `<div class="vbox" role="alertdialog" aria-modal="true" aria-labelledby="vt"><div class="vwarn">⚠️</div><h2 id="vt">${vErr === 'too_fast' ? 'Too fast!' : 'Time exceeded'}</h2>
+         <p>${vErr === 'too_fast' ? 'Let the partner page load fully before you come back.' : 'Please try again, or contact Support for a review.'}</p>
+         <button id="vretry" type="button" class="gold vgo">Try again</button><button id="vskip" type="button" class="vskip">Not now</button></div>`
+      : `<div class="vbox" role="alertdialog" aria-modal="true" aria-labelledby="vt"><div class="vspin" aria-hidden="true"></div><h2 id="vt">${code} in progress</h2>
+         <p>Stay on the partner page until it has fully loaded, then come back here. Other tasks unlock once this one is checked.</p>
+         <button id="vcheck" type="button" class="gold vgo">I'm back: check my visit</button></div>`;
+    m.querySelector('#vcheck')?.addEventListener('click', checkReturn);
+    m.querySelector('#vretry')?.addEventListener('click', retryVisit);
+    m.querySelector('#vskip')?.addEventListener('click', () => { vErr = null; sessionStorage.removeItem('rh_visit'); syncVisitModal(); if (location.hash.startsWith('#/earn')) paintEarn(); });
+  }
+  setInterval(syncVisitModal, 3000);   // also covers page reloads and the end of the time window
+  const say = h => { const el = $('#em') || $('#m'); if (el) el.innerHTML = h; else app.insertAdjacentHTML('afterbegin', h); };
   const loadV = () => { try { return JSON.parse(sessionStorage.rh_visit || 'null'); } catch { return null; } };
-  const showWaiting = () => say(note(TASK_OPENED) + WAIT_BOX);
+  const showWaiting = () => { vErr = null; syncVisitModal(); say(note(TASK_OPENED)); };
   async function beginVisit(id, url) {
     try { await call('startVisit')({ opportunityId: id }); } catch (e) { console.error('startVisit', e); return; }
     sessionStorage.rh_visit = JSON.stringify({ id, url, t: Date.now() });
-    setTimeout(() => { if (location.hash.startsWith('#/earn')) paintEarn(); }, VISIT_MAX_MS + 500);   // lock ends if the user never comes back
   }
   async function retryVisit() {
     const p = loadV(); if (!p) return;
@@ -88,16 +118,16 @@ export function createUserUI(c) {
   let checking = false;
   async function checkReturn() {
     const p = loadV(); if (!p || checking || Date.now() - p.t < 3000) return;   // ignore the tab flicker right after opening the link
-    checking = true;
+    checking = true; const go = document.getElementById('vcheck'); if (go) { go.disabled = true; go.textContent = 'Checking…'; }
     try {
       const r = await call('completeVisit')({ opportunityId: p.id });
-      if (r.result === 'none') { sessionStorage.removeItem('rh_visit'); return; }
+      if (r.result === 'none') { sessionStorage.removeItem('rh_visit'); vErr = null; syncVisitModal(); return; }
       if (r.result === 'passed') {
-        sessionStorage.removeItem('rh_visit');
-        if (location.hash.startsWith('#/earn')) await route();   // repaint so the next task unlocks
+        sessionStorage.removeItem('rh_visit'); vErr = null; syncVisitModal();   // modal disappears
+        if (location.hash.startsWith('#/earn')) await route();   // repaint so the other tasks become active
         say(note('Time requirement met! You can continue.'));
-      } else say(retryBox(r.result === 'too_fast' ? 'Too fast! Please try again.' : 'Time exceeded. Please try again, or contact Support for a review.'));
-    } catch (x) { say(note(err(x))); } finally { checking = false; }
+      } else { vErr = r.result === 'too_fast' ? 'too_fast' : 'too_slow'; vShown = ''; syncVisitModal(); }
+    } catch (x) { if (go) { go.disabled = false; go.textContent = "I'm back: check my visit"; } say(note(err(x))); } finally { checking = false; }
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReturn(); });
   window.addEventListener('pageshow', checkReturn);
@@ -114,10 +144,7 @@ export function createUserUI(c) {
   const earnBox = () => {
     const now = Date.now(), isCool = x => (E.until[x.id] || 0) > now, act = activeVisit();
     const cool = E.opps.filter(isCool).sort((a, b) => E.until[a.id] - E.until[b.id]), ready = E.opps.filter(x => !isCool(x));
-    const cur = act && E.opps.find(x => x.id === act.id);
-    const banner = act ? `<div class="msg" role="status">One task at a time: finish ${cur ? esc(cur.code) : 'your current task'} first. Stay on the partner page until it loads, then come back and tap below to unlock the other tasks.
-      <p class="acts"><button type="button" class="alt" data-check>I'm back: check my visit</button></p></div>` : '';
-    return banner + `<h2>Available now <span class="badge">${ready.length}</span></h2>` +
+    return `<h2>Available now <span class="badge">${ready.length}</span></h2>` +
       (ready.length ? `<div class="grid">${ready.map(x => readyCard(x, act && act.id !== x.id)).join('')}</div>` : note(cool.length ? 'You have started everything that is available. The next one unlocks when its timer below finishes.' : 'No opportunities right now. Check back soon.')) +
       (cool.length ? `<h2>Waiting for timer <span class="badge">${cool.length}</span></h2><div class="grid">${cool.map(coolCard).join('')}</div>` : '');
   };
