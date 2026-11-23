@@ -7,6 +7,7 @@ export function createAdminReview(c) {
   const secs = a => a?.createdAt?.seconds || 0, isNew = a => secs(a) > Date.now() / 1000 - 86400;
   const sumPts = l => l.reduce((s, a) => s + (+a.rewardPoints || 0), 0);
   const OKNOTE = 'Approved by admin', NONOTE = 'Rejected by admin';   // automatic notes, nothing to type
+  const BULK_MAX = 300;   // activities per bulk request (keep in sync with MAX in admin-bulk.js)
   const nameOf = u => u?.name || u?.fullName || u?.email || u?.phone || 'Unnamed user';
 
   function build(users, items) {
@@ -31,7 +32,7 @@ export function createAdminReview(c) {
   const group = (g, open) => {
     const conf = g.items.filter(a => a.status === 'pending_review').length, unc = g.items.length - conf, id = esc(g.uid);
     return `<div class="card rvg"><div class="rvh"><div><div class="rvname">${esc(g.name)} <span class="badge">${g.items.length}</span> ${g.items.some(isNew) ? '<span class="tag">New</span>' : ''}</div>
-      <div class="mute">${esc(g.phone)}${g.email ? ' ﹞ ' + esc(g.email) : ''}</div><div class="mute">${pts(sumPts(g.items))} waiting ﹞ oldest ${when(g.items.at(-1).createdAt)}</div></div>
+      <div class="mute">${esc(g.phone)}${g.email ? ' · ' + esc(g.email) : ''}</div><div class="mute">${pts(sumPts(g.items))} waiting · oldest ${when(g.items.at(-1).createdAt)}</div></div>
       <div class="acts">${conf && unc ? `<button class="alt" data-all="${id}" data-scope="confirmed">Approve confirmed (${conf})</button>` : ''}<button class="gold" data-all="${id}" data-scope="all">Approve all (${g.items.length})</button></div></div>
       <details ${open ? 'open' : ''}><summary class="mute">Show activities</summary><div class="scroll"><table><tr><th>User</th><th>When</th><th>Code</th><th>Points</th><th>Status</th><th>Partner</th><th></th></tr>${g.items.map(a => item(a, g.name)).join('')}</table></div></details></div>`;
   };
@@ -45,7 +46,7 @@ export function createAdminReview(c) {
   function html(users, items, recent) {
     build(users, items);
     decided = (recent || []).map(a => `<tr><td><b>${esc(nameOf(users.find(u => u.id === a.uid)))}</b></td><td>${when(a.createdAt)}</td><td>${esc(a.opportunityCode)}</td><td>${pts(a.rewardPoints)}</td><td>${stat(a.status)}</td></tr>`);
-    const sorts = [['count', 'Most requests'], ['name', 'Name A每Z'], ['newest', 'Newest first'], ['oldest', 'Oldest first'], ['points', 'Most points']];
+    const sorts = [['count', 'Most requests'], ['name', 'Name A to Z'], ['newest', 'Newest first'], ['oldest', 'Oldest first'], ['points', 'Most points']];
     const names = [...new Set(all.map(g => g.name))].sort();
     return `<h1>Review</h1><div id="rvstats">${stats()}</div>
       <div class="rvbar"><input id="rvq" type="search" list="rvnames" placeholder="Search user by name or phone" value="${esc(S.q)}" aria-label="Search users" autocomplete="off">
@@ -66,16 +67,22 @@ export function createAdminReview(c) {
     try { await call('adminReviewActivity')({ attemptId: b.dataset.ra, decision: dec, note: dec === 'approve' ? OKNOTE : NONOTE }); drop([b.dataset.ra]); }
     catch (x) { b.disabled = false; alert(err(x)); } finally { busy = false; }
   }
+  // "Approve all" sends the whole batch to the server in ONE request per 300 activities (was: one request per activity).
   async function bulk(b) {
     if (busy) return; const g = all.find(x => x.uid === b.dataset.all); if (!g) return;
     const items = g.list.filter(a => b.dataset.scope === 'all' || a.status === 'pending_review'), unc = items.filter(a => a.status !== 'pending_review').length;
     if (!items.length || !confirm(`Approve ${items.length} activities (${sumPts(items)} pts) for ${g.name} only?` + (unc ? `\n\n${unc} of them have no partner confirmation yet.` : ''))) return;
-    busy = true; b.closest('.rvg').querySelectorAll('button').forEach(x => x.disabled = true); const done = [], fail = [];
-    for (let i = 0; i < items.length; i++) {
-      b.textContent = `Approving ${i + 1}/${items.length}＃`;
-      try { await call('adminReviewActivity')({ attemptId: items[i].id, decision: 'approve', note: OKNOTE }); done.push(items[i].id); } catch (x) { fail.push(err(x)); }
+    busy = true; b.closest('.rvg').querySelectorAll('button').forEach(x => x.disabled = true);
+    let approved = 0, skipped = 0, failMsg = '';
+    for (let i = 0; i < items.length; i += BULK_MAX) {
+      const part = items.slice(i, i + BULK_MAX); b.textContent = `Approving ${Math.min(i + BULK_MAX, items.length)}/${items.length}…`;
+      try {
+        const r = await call('adminReviewBulk')({ uid: g.uid, attemptIds: part.map(a => a.id), note: OKNOTE });
+        approved += r.approved || 0; skipped += r.skipped || 0; drop(r.approvedIds || []);
+      } catch (x) { failMsg = err(x); break; }
     }
-    busy = false; drop(done); if (fail.length) alert(`${done.length} approved, ${fail.length} failed:\n` + [...new Set(fail)].join('\n'));
+    busy = false; paint();
+    if (failMsg || skipped) alert(`${approved} approved` + (skipped ? `, ${skipped} skipped (already handled)` : '') + (failMsg ? `.\nStopped: ${failMsg}` : '.'));
   }
   function bind() {
     const L = $('#rvlist'); if (!L) return; let t;
