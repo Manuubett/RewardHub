@@ -1,7 +1,7 @@
 // Visit-time check. The SERVER measures the time (browser clocks and sessionStorage can be edited by users).
 // Flow: startVisit (server records start) -> user visits partner page -> returns -> completeVisit (server computes elapsed).
 // This does NOT award points. Points still need the partner confirmation + admin review.
-const MIN = Number(process.env.VISIT_MIN_SECONDS) || 30;
+const MIN = Number(process.env.VISIT_MIN_SECONDS) || 15;
 const MAX = Number(process.env.VISIT_MAX_SECONDS) || 180;
 const GATE = process.env.VISIT_GATE !== 'off';   // one-task-at-a-time lock is ON unless VISIT_GATE=off
 
