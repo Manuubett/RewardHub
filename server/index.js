@@ -236,9 +236,11 @@ app.post('/mpesa/:kind', async (req, res) => {
   } catch (e) { console.error('B2C callback failed', e); res.status(500).json({ ResultCode: 1, ResultDesc: 'Processing failed' }); }
 });
 
+const visits = require('./visits')({ api, db, FV, HttpsError, uidOf });   // visit-time check + optional task unlocking
 // SemaAfrica points system (opportunities, cooldowns, review, ledger) lives in points.js
 // After an admin approves an activity, check whether it completes a friend's referral
 const apiWithReferrals = (name, fn) => api(name, async c => {
+  if (name === 'startOpportunity') await visits.assertUnlocked(uidOf(c), c.data.opportunityId);   // only enforced when VISIT_GATE=on
   const out = await fn(c);
   if (name === 'adminReviewActivity' && c.data.decision === 'approve') {
     const a = await db.doc('activityAttempts/' + c.data.attemptId).get().catch(() => null);
