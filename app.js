@@ -1,6 +1,6 @@
 import { auth, db, API_URL } from './firebase-config.js';
 import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { collection, doc, getDoc, getDocs, onSnapshot, query, where, addDoc, setDoc, updateDoc, serverTimestamp, orderBy, limit } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { collection, doc, getDoc, getDocs, getCountFromServer, onSnapshot, query, where, addDoc, setDoc, updateDoc, serverTimestamp, orderBy, limit } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 import { createUserUI } from './user-ui.js';
 import { createAdminReview } from './admin-review.js';
 
@@ -45,7 +45,45 @@ const authErr = e => AUTH_MSG[e?.code] || err(e);
 const normPhone = s => { let p = String(s || '').replace(/[\s\-+]/g, ''); if (p.startsWith('0')) p = '254' + p.slice(1); return p; };
 const phoneOk = p => /^2547\d{8}$|^2541\d{8}$/.test(p);   // same rule as server.js
 const deviceId = localStorage.rh_dev || (localStorage.rh_dev = crypto.randomUUID());
-let user = null, profile = null, isAdmin = false, unsub = null, flash = '', registering = false;
+let user = null, profile = null, isAdmin = false, unsub = null, flash = '', registering = false, reviewDirty = false;
+
+// ---------- Admin data cache (saves Firestore reads) ----------
+// Each admin tab loads only what it shows. Results are kept in memory for a short time, so switching tabs does not download
+// the same collections again. Any admin action clears the keys it changes (see `act` in bind.admin).
+const memo = {};
+const cached = (key, ttl, fn) => {
+  const m = memo[key]; if (m && Date.now() - m.t < ttl) return m.v;
+  const v = fn(); memo[key] = { t: Date.now(), v }; v.catch(() => { if (memo[key]?.v === v) delete memo[key]; }); return v;
+};
+const bust = (...keys) => (keys.length ? keys : Object.keys(memo)).forEach(k => delete memo[k]);
+const MIN1 = 60e3, MIN5 = 300e3;
+const OPEN_WD = ['pending', 'submission_failed', 'submission_error', 'needs_review'];
+const D = {   // one cached loader per dataset
+  users: () => cached('users', MIN5, () => rows(collection(db, 'users'))),
+  partners: () => cached('partners', MIN5, () => rows(collection(db, 'partners'))),
+  opps: () => cached('opps', MIN1, () => rows(collection(db, 'opportunities'))),
+  camps: () => cached('camps', MIN1, () => rows(collection(db, 'campaigns'))),
+  pays: () => cached('pays', MIN5, () => rows(collection(db, 'partnerPayments'))),
+  ledgerAll: () => cached('ledgerAll', MIN5, () => rows(collection(db, 'ledger'))),   // only the Partners tab needs the full cash ledger
+  ledger30: () => cached('ledger30', MIN5, () => rows(query(collection(db, 'ledger'), where('createdAt', '>=', new Date(Date.now() - 30 * 864e5)), limit(1000)))),
+  pled: () => cached('pled', MIN5, () => rows(query(collection(db, 'pointLedger'), orderBy('createdAt', 'desc'), limit(500)))),
+  waiting: () => cached('waiting', 30e3, () => rows(query(collection(db, 'activityAttempts'), where('status', 'in', ['pending_review', 'started']), limit(500)))),
+  recent: () => cached('recent', 30e3, () => rows(query(collection(db, 'activityAttempts'), orderBy('createdAt', 'desc'), limit(60)))),
+  atts: () => cached('atts', MIN1, () => rows(query(collection(db, 'activityAttempts'), orderBy('createdAt', 'desc'), limit(200)))),
+  wdOpen: () => cached('wdOpen', 30e3, () => rows(query(collection(db, 'withdrawals'), where('status', 'in', OPEN_WD), limit(200)))),
+  wdDone: () => cached('wdDone', MIN1, () => rows(query(collection(db, 'withdrawals'), orderBy('createdAt', 'desc'), limit(60)))),
+  tix: () => cached('tix', MIN1, () => rows(query(collection(db, 'tickets'), orderBy('createdAt', 'desc'), limit(100)))),
+  // Sidebar badges use count queries (about 1 read per 1000 matches) instead of downloading whole collections.
+  badges: () => cached('badges', MIN1, async () => {
+    const c = async q => { try { return (await getCountFromServer(q)).data().count; } catch (e) { console.error('count', e); return 0; } };
+    const [review, pay, sus, tix] = await Promise.all([
+      c(query(collection(db, 'activityAttempts'), where('status', 'in', ['pending_review', 'started']))),
+      c(query(collection(db, 'withdrawals'), where('status', 'in', OPEN_WD))),
+      c(query(collection(db, 'users'), where('status', '!=', 'active'))),
+      c(query(collection(db, 'tickets'), where('reply', '==', '')))]);
+    return { review, pay, sus, tix };
+  })
+};
 
 // Earn / Opportunity / Dashboard pages (progress bars, moving cards) live in user-ui.js; the admin Review tab lives in admin-review.js.
 const UI = createUserUI({ $, app, esc, pts, ptsVal, ptsKes, kes, note, err, call, rows, byDate, when, stat, availKes, MIN_PAY, RATE_NOTE,
@@ -53,12 +91,17 @@ const UI = createUserUI({ $, app, esc, pts, ptsVal, ptsKes, kes, note, err, call
 const RV = createAdminReview({ $, app, esc, pts, when, stat, call, err });
 
 onAuthStateChanged(auth, async u => {
-  user = u; unsub?.(); profile = null; isAdmin = false;
+  user = u; unsub?.(); profile = null; isAdmin = false; bust();
   if (u) {
     // Admin = custom claim `admin: true` OR a document at admins/{uid} (same rule as the server and Firestore rules).
     isAdmin = await u.getIdTokenResult(true).then(t => t.claims.admin === true, () => false)
       || await getDoc(doc(db, 'admins', u.uid)).then(d => d.exists(), () => false);
-    unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.data() || null; if (!/login|setup|support|admin|task|opportunity/.test(location.hash)) route(); }, e => console.error('profile listener', e));
+    unsub = onSnapshot(doc(db, 'users', u.uid), s => {
+      const first = !profile; profile = s.data() || null;
+      // Repaint only when the profile FIRST arrives, and only on pages that show balances. Before, every profile change re-ran the
+      // current page and all of its queries. Later changes show up the next time the user opens a page.
+      if (first && profile && /^#\/(dashboard|wallet|withdraw|referrals)/.test(location.hash)) route();
+    }, e => console.error('profile listener', e));
   }
   if (!registering) route();
 });
@@ -166,26 +209,65 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
     <h2>Your messages</h2>${k.map(x => `<div class="card"><b>${esc(x.subject)}</b><p>${esc(x.message)}</p>${x.reply ? `<p class="msg">Support: ${esc(x.reply)}</p>` : '<span class="mute">Awaiting reply</span>'}</div>`).join('') || '<p class="mute">No messages yet.</p>'}`;
   },
 
+  // ---------- Admin: every tab loads ONLY its own data (cached for a short time) ----------
   admin: async (tab = 'overview') => {
     if (!isAdmin) return note('Admins only.');
-    const [users, wd, led, partners, pays, camps, tix] = await Promise.all(['users', 'withdrawals', 'ledger', 'partners', 'partnerPayments', 'campaigns', 'tickets'].map(c => rows(collection(db, c))));
-    const now = Date.now() / 1e3, prof = d => led.filter(x => x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.payout || 0) - (x.reward || 0), 0);
-    const earn = led.filter(x => x.type === 'pending').reduce((a, x) => a + x.reward, 0);
-    const owed = p => led.filter(x => x.partnerId === p).reduce((a, x) => a + (x.payout || 0), 0), paid = p => pays.filter(x => x.partnerId === p).reduce((a, x) => a + x.amount, 0);
-    const pn = id => esc(partners.find(p => p.id === id)?.name || id), sus = users.filter(u => u.status !== 'active' || u.flags?.length);
-    const ub = (u, s, t) => `<button class="alt" data-st="${s}" data-uid="${u.id}">${t}</button>`;
-    // ---- SemaAfrica points: review, opportunities, report ----
-    const [opps, atts, pled, waiting] = await Promise.all([rows(collection(db, 'opportunities')),
-      rows(query(collection(db, 'activityAttempts'), orderBy('createdAt', 'desc'), limit(200))), rows(query(collection(db, 'pointLedger'), orderBy('createdAt', 'desc'), limit(500))),
-      rows(query(collection(db, 'activityAttempts'), where('status', 'in', ['pending_review', 'started']), limit(500)))]);   // everything still waiting, not only the latest 200
-    opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-    const sum = f => users.reduce((a, u) => a + (u[f] || 0), 0);
-    const apprSince = d => pled.filter(x => x.type === 'reward_approved' && x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.approvedDelta || 0), 0);
-    const queue = waiting;
-    const cnt = (id, s) => atts.filter(a => a.opportunityId === id && (s === 'confirmed' ? ['pending_review', 'approved'].includes(a.status) : s === 'started' || a.status === s)).length;
-    const oc = (v, t) => `<option value="${v}" ${v === t.cur ? 'selected' : ''}>${t.l}</option>`;
-    const types = [['verified_offer', 'Verified offer'], ['signup', 'Sign-up'], ['install', 'App install'], ['survey', 'Survey'], ['permitted_click', 'Click (only if the partner explicitly pays/permits it)']];
-    const oppForm = o => `<details class="card"><summary><b>${esc(o.code)}</b> ${esc(o.title)} · ${pts(o.rewardPoints)} · ${o.cooldownMinutes} min · <span class="${o.active ? 'active' : 'suspended'}">${o.active ? 'Active' : 'Paused'}</span>
+    if (reviewDirty) { bust('waiting', 'recent', 'badges', 'pled', 'users'); reviewDirty = false; }   // approvals/rejections were made on the Review tab
+    const KEYS = ['overview', 'review', 'payments', 'top', 'opportunities', 'users', 'partners', 'campaigns', 'support'];
+    const cur = KEYS.includes(tab) ? tab : 'overview';
+    const now = Date.now() / 1e3;
+    const uf = (users, id) => users.find(u => u.id === id) || {}, local = ph => String(ph || '').replace(/^254/, '0');
+    const tabs = [['overview', 'Overview'], ['review', 'Review'], ['payments', 'Payments'], ['top', 'Top users'], ['opportunities', 'Opportunities'], ['users', 'Users'], ['partners', 'Partners'], ['campaigns', 'Campaigns'], ['support', 'Support']];
+    const badgeOf = (B, k) => ({ review: B.review, payments: B.pay, users: B.sus, support: B.tix }[k] || 0);
+
+    const S = {
+      overview: async Bp => {
+        const [B, users, pled, led] = await Promise.all([Bp, D.users(), D.pled(), D.ledger30()]);
+        const sum = f => users.reduce((a, u) => a + (u[f] || 0), 0);
+        const apprSince = d => pled.filter(x => x.type === 'reward_approved' && x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.approvedDelta || 0), 0);
+        const prof = d => led.filter(x => x.createdAt?.seconds > now - d * 864e2).reduce((a, x) => a + (x.payout || 0) - (x.reward || 0), 0);
+        const earn = led.filter(x => x.type === 'pending').reduce((a, x) => a + x.reward, 0);
+        const attention = [['Payments to make', B.pay, 'payments'], ['Awaiting review', B.review, 'review'], ['Open support tickets', B.tix, 'support']];
+        return `<h1>Overview</h1><div class="grid">${attention.map(([l, n, k]) => `<a class="card" href="#/admin/${k}"><div class="mute">${l}</div><div class="big">${n}</div></a>`).join('')}</div>
+      <h2>Points</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${ptsVal(sum('pendingPoints'))}</div></div>
+      <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${ptsVal(sum('approvedPoints'))}</div></div>
+      <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${ptsVal(apprSince(7))}</div></div>
+      <div class="card"><div class="mute">Approved in last 30 days</div><div class="big">${ptsVal(apprSince(30))}</div></div></div>
+      <p class="mute">Rate: ${PTS_PER_KES} points = KES 1. The 7 and 30 day figures use the latest 500 points entries. This page is refreshed every few minutes to save database reads.</p>
+      <h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
+      <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
+      <div class="card"><div class="mute">Rewards credited (last 30 days)</div><div class="big">${kes(earn)}</div></div></div>`;
+      },
+      review: async () => {
+        const [users, waiting, recent] = await Promise.all([D.users(), D.waiting(), D.recent()]);
+        return RV.html(users, waiting, recent.filter(a => !['started', 'pending_review'].includes(a.status)));
+      },
+      payments: async () => {
+        const [users, open, recent] = await Promise.all([D.users(), D.wdOpen(), D.wdDone()]);
+        const toPay = open.sort((a, b) => byDate(b, a)), done = recent.filter(w => !OPEN_WD.includes(w.status)).sort(byDate);
+        const payCard = w => { const u = uf(users, w.uid), how = [w.pointsDeducted ? pts(w.pointsDeducted) : '', w.cashDeducted ? kes(w.cashDeducted) + ' cash balance' : ''].filter(Boolean).join(' + ');
+          return `<div class="card"><div class="paycard"><div>
+      <b>${esc(w.name || u.name)}</b> <span class="tag ${esc(w.status)}">${esc(w.status)}</span><br>
+      M-Pesa number: <b>${esc(local(w.phone))}</b> <span class="mute">(${esc(w.phone)})</span> <button type="button" class="alt" data-copy="${esc(w.phone)}">Copy</button><br>
+      <span class="mute">Requested ${when(w.createdAt)} · Account: ${esc(u.status || 'unknown')}${u.flags?.length ? ' · ⚠ ' + esc(u.flags.join(', ')) : ''}</span></div>
+      <div><div class="big">${kes(w.amount)}</div><div class="mute">${how ? 'Deducted: ' + how : ''}</div></div></div>
+      ${['submission_error', 'needs_review'].includes(w.status) ? note('This may already have been sent through M-Pesa. Check your M-Pesa statement before paying again.') : ''}
+      <p><button data-w="${w.id}" data-d="paid">Mark as paid</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject &amp; refund</button></p></div>`; };
+        return `<h1>Payments</h1><h2>Payments to make (${toPay.length})</h2><p class="mute">Send the money manually from M-Pesa to the number shown, then press <b>Mark as paid</b> and enter the M-Pesa confirmation code. Reject refunds the user's balance.</p>
+      ${toPay.map(payCard).join('') || '<p class="mute">No payment requests waiting.</p>'}
+      <h2>Payment history (latest)</h2><div class="scroll"><table><tr><th>Requested</th><th>Name</th><th>M-Pesa number</th><th>Amount</th><th>Status</th><th>M-Pesa code / note</th></tr>
+      ${done.map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(local(w.phone))}</td><td>${kes(w.amount)}</td><td class="${esc(w.status)}">${esc(w.status)}</td><td>${esc(w.mpesaReceipt || w.note || '')}</td></tr>`).join('') || '<tr><td colspan=6>None yet.</td></tr>'}</table></div>`;
+      },
+      top: async () => `<h1>Top users</h1><p class="mute">Ranked by <b>approved</b> points only (reviewed and partner-confirmed). Flagged and suspended accounts are left out, and names are shortened. Only share names of members who are comfortable with it.</p>
+      <div class="chips" id="topchips"><button type="button" data-p="week" class="on">This week</button><button type="button" data-p="month" class="alt">This month</button><button type="button" data-p="all" class="alt">All time</button></div>
+      <div id="topbox"><p class="mute">Loading…</p></div>`,
+      opportunities: async () => {
+        const [opps, partners, atts] = await Promise.all([D.opps(), D.partners(), D.atts()]);
+        opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+        const cnt = (id, s) => atts.filter(a => a.opportunityId === id && (s === 'confirmed' ? ['pending_review', 'approved'].includes(a.status) : s === 'started' || a.status === s)).length;
+        const oc = (v, t) => `<option value="${v}" ${v === t.cur ? 'selected' : ''}>${t.l}</option>`;
+        const types = [['verified_offer', 'Verified offer'], ['signup', 'Sign-up'], ['install', 'App install'], ['survey', 'Survey'], ['permitted_click', 'Click (only if the partner explicitly pays/permits it)']];
+        const oppForm = o => `<details class="card"><summary><b>${esc(o.code)}</b> ${esc(o.title)} · ${pts(o.rewardPoints)} · ${o.cooldownMinutes} min · <span class="${o.active ? 'active' : 'suspended'}">${o.active ? 'Active' : 'Paused'}</span>
       <span class="mute">· ${cnt(o.id, 'started')} started / ${cnt(o.id, 'confirmed')} confirmed / ${cnt(o.id, 'approved')} approved</span></summary>
       <form class="of" data-id="${o.id}" style="max-width:520px">
       <label>Title<input name="title" value="${esc(o.title)}" maxlength="80" required></label>
@@ -202,60 +284,45 @@ home: () => `<section class="hero"><h1>A side hustle for Kenyans. Don't stay idl
       <label>Where is that permission recorded?<input name="providerPermissionNote" value="${esc(o.providerPermissionNote)}" maxlength="500" placeholder="e.g. email from provider, date / reference"></label>
       <label><input type="checkbox" name="active" ${o.active ? 'checked' : ''}> Active (visible to users)</label>
       <button>Save</button></form></details>`;
-    // ---- Manual payment requests ----
-    const OPEN = ['pending', 'submission_failed', 'submission_error', 'needs_review'];
-    const uf = id => users.find(u => u.id === id) || {}, local = ph => String(ph || '').replace(/^254/, '0');
-    const toPay = wd.filter(w => OPEN.includes(w.status)).sort((a, b) => byDate(b, a)), done = wd.filter(w => !OPEN.includes(w.status)).sort(byDate);
-    const payCard = w => { const u = uf(w.uid), how = [w.pointsDeducted ? pts(w.pointsDeducted) : '', w.cashDeducted ? kes(w.cashDeducted) + ' cash balance' : ''].filter(Boolean).join(' + ');
-      return `<div class="card"><div class="paycard"><div>
-      <b>${esc(w.name || u.name)}</b> <span class="tag ${esc(w.status)}">${esc(w.status)}</span><br>
-      M-Pesa number: <b>${esc(local(w.phone))}</b> <span class="mute">(${esc(w.phone)})</span> <button type="button" class="alt" data-copy="${esc(w.phone)}">Copy</button><br>
-      <span class="mute">Requested ${when(w.createdAt)} · Account: ${esc(u.status || 'unknown')}${u.flags?.length ? ' · ⚠ ' + esc(u.flags.join(', ')) : ''}</span></div>
-      <div><div class="big">${kes(w.amount)}</div><div class="mute">${how ? 'Deducted: ' + how : ''}</div></div></div>
-      ${['submission_error', 'needs_review'].includes(w.status) ? note('This may already have been sent through M-Pesa. Check your M-Pesa statement before paying again.') : ''}
-      <p><button data-w="${w.id}" data-d="paid">Mark as paid</button> <button class="bad" data-w="${w.id}" data-d="rejected">Reject &amp; refund</button></p></div>`; };
-    const attention = [['Payments to make', toPay.length, 'payments'], ['Awaiting review', queue.length, 'review'], ['Open support tickets', tix.filter(t => !t.reply).length, 'support']];
-    const S = {};
-    S.overview = `<h1>Overview</h1><div class="grid">${attention.map(([l, n, k]) => `<a class="card" href="#/admin/${k}"><div class="mute">${l}</div><div class="big">${n}</div></a>`).join('')}</div>
-      <h2>Points</h2><div class="grid"><div class="card"><div class="mute">Pending points (all users)</div><div class="big">${ptsVal(sum('pendingPoints'))}</div></div>
-      <div class="card"><div class="mute">Approved balance (all users)</div><div class="big">${ptsVal(sum('approvedPoints'))}</div></div>
-      <div class="card"><div class="mute">Approved in last 7 days</div><div class="big">${ptsVal(apprSince(7))}</div></div>
-      <div class="card"><div class="mute">Approved in last 30 days</div><div class="big">${ptsVal(apprSince(30))}</div></div></div>
-      <p class="mute">Rate: ${PTS_PER_KES} points = KES 1. Counts come from SemaAfrica's own records (latest 200 activities), not from provider reports.</p>
-      <h2>Profit (earlier cash tasks)</h2><div class="grid"><div class="card"><div class="mute">Last 24 hours</div><div class="big">${kes(prof(1))}</div></div>
-      <div class="card"><div class="mute">Last 7 days</div><div class="big">${kes(prof(7))}</div></div><div class="card"><div class="mute">Last 30 days</div><div class="big">${kes(prof(30))}</div></div>
-      <div class="card"><div class="mute">Rewards credited (all time)</div><div class="big">${kes(earn)}</div></div></div>`;
-    S.review = RV.html(users, waiting, atts.filter(a => !['started', 'pending_review'].includes(a.status)));
-    S.payments = `<h1>Payments</h1><h2>Payments to make (${toPay.length})</h2><p class="mute">Send the money manually from M-Pesa to the number shown, then press <b>Mark as paid</b> and enter the M-Pesa confirmation code. Reject refunds the user's balance.</p>
-      ${toPay.map(payCard).join('') || '<p class="mute">No payment requests waiting.</p>'}
-      <h2>Payment history</h2><div class="scroll"><table><tr><th>Requested</th><th>Name</th><th>M-Pesa number</th><th>Amount</th><th>Status</th><th>M-Pesa code / note</th></tr>
-      ${done.map(w => `<tr><td>${when(w.createdAt)}</td><td>${esc(w.name)}</td><td>${esc(local(w.phone))}</td><td>${kes(w.amount)}</td><td class="${esc(w.status)}">${esc(w.status)}</td><td>${esc(w.mpesaReceipt || w.note || '')}</td></tr>`).join('') || '<tr><td colspan=6>None yet.</td></tr>'}</table></div>`;
-    S.opportunities = `<h1>Opportunities</h1><p class="mute">${opps.length} opportunities. Tap one to edit it. New ones start paused: fill in the URL, reward and requirements, then tick Active.</p><p><button id="addbtn">Add a new BTN</button></p>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
+        return `<h1>Opportunities</h1><p class="mute">${opps.length} opportunities. Tap one to edit it. New ones start paused: fill in the URL, reward and requirements, then tick Active. Started / confirmed counts use the latest 200 activities.</p><p><button id="addbtn">Add a new BTN</button></p>${opps.length < 20 ? `<p><button id="seed">Create the missing BTN001–BTN020 entries</button> <span class="mute">${opps.length} of 20 exist. New ones start paused.</span></p>` : ''}
       ${opps.map(oppForm).join('')}`;
-    S.users = `<h1>Users</h1><h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
+      },
+      users: async () => {
+        const users = await D.users(), sus = users.filter(u => u.status !== 'active' || u.flags?.length);
+        const ub = (u, s, t) => `<button class="alt" data-st="${s}" data-uid="${u.id}">${t}</button>`;
+        return `<h1>Users</h1><h2>Suspicious accounts</h2><div class="scroll"><table><tr><th>User</th><th>Phone</th><th>Status</th><th>Flags</th><th></th></tr>
       ${sus.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${esc(u.status)}">${esc(u.status)}</td><td>${esc((u.flags || []).join(', '))}</td><td>${ub(u, 'suspended', 'Suspend')} ${ub(u, 'active', 'Clear')}</td></tr>`).join('') || '<tr><td colspan=5>Nothing flagged.</td></tr>'}</table></div>
       <h2>All users (${users.length})</h2><div class="scroll"><table><tr><th>Name</th><th>Phone</th><th>Status</th><th>Pending pts</th><th>Approved pts</th><th>Cash pending</th><th>Cash approved</th></tr>
       ${users.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.phone)}</td><td class="${esc(u.status)}">${esc(u.status)}</td><td>${pts(u.pendingPoints)}</td><td>${pts(u.approvedPoints)}</td><td>${kes(u.pending)}</td><td>${kes(u.approved)}</td></tr>`).join('')}</table></div>`;
-    S.partners = `<h1>Partners</h1><h2>Advertising partners</h2><form id="pf" class="wide row"><input name="n" placeholder="Partner name" required><button>Add partner</button></form>
+      },
+      partners: async () => {
+        const [partners, led, pays] = await Promise.all([D.partners(), D.ledgerAll(), D.pays()]);
+        const owed = p => led.filter(x => x.partnerId === p).reduce((a, x) => a + (x.payout || 0), 0), paid = p => pays.filter(x => x.partnerId === p).reduce((a, x) => a + x.amount, 0);
+        return `<h1>Partners</h1><h2>Advertising partners</h2><form id="pf" class="wide row"><input name="n" placeholder="Partner name" required><button>Add partner</button></form>
       <div class="scroll"><table><tr><th>Partner</th><th>ID</th><th>Secret (give to partner)</th><th>Owed</th><th>Paid</th><th>Balance</th></tr>
       ${partners.map(p => `<tr><td>${esc(p.name)}</td><td>${p.id}</td><td>${esc(p.secret)}</td><td>${kes(owed(p.id))}</td><td>${kes(paid(p.id))}</td><td>${kes(paid(p.id) - owed(p.id))}</td></tr>`).join('') || '<tr><td colspan=6>No partners yet.</td></tr>'}</table></div>
       <h2>Record advertiser payment</h2><form id="payf"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
       <input name="a" type="number" min="1" placeholder="Amount received (KES)" required><input name="r" placeholder="Reference (bank / M-Pesa code)"><button>Record payment</button></form>`;
-    S.campaigns = `<h1>Campaigns</h1><h2>Add campaign</h2><form id="cf" style="max-width:520px"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      },
+      campaigns: async () => {
+        const [partners, camps] = await Promise.all([D.partners(), D.camps()]);
+        const pn = id => esc(partners.find(p => p.id === id)?.name || id);
+        return `<h1>Campaigns</h1><h2>Add campaign</h2><form id="cf" style="max-width:520px"><select name="p">${partners.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
       <input name="t" placeholder="Title" required><input name="u" type="url" placeholder="Partner tracking URL (https://…)" required>
       <input name="rw" type="number" min="1" placeholder="User reward (KES)" required><input name="po" type="number" min="1" placeholder="Advertiser pays you (KES)" required>
       <select name="ty"><option value="conversion">Pays on completed action</option><option value="cpc">Pays for valid click (partner-confirmed)</option></select>
       <textarea name="q" rows="3" placeholder="Requirements shown to users" required></textarea><button>Add campaign</button></form>
       <h2>All campaigns</h2><div class="scroll"><table><tr><th>Title</th><th>Partner</th><th>Reward</th><th>Active</th><th></th></tr>
       ${camps.map(c => `<tr><td>${esc(c.title)}</td><td>${pn(c.partnerId)}</td><td>${kes(c.reward)}</td><td>${c.active}</td><td><button class="alt" data-c="${c.id}" data-on="${!c.active}">${c.active ? 'Pause' : 'Resume'}</button></td></tr>`).join('') || '<tr><td colspan=5>No campaigns yet.</td></tr>'}</table></div>`;
-    S.support = `<h1>Support tickets</h1>${tix.sort(byDate).map(t => `<div class="card" style="margin:.7rem 0"><b>${esc(t.subject)}</b> <span class="mute">${esc(users.find(u => u.id === t.uid)?.name)}</span><p>${esc(t.message)}</p>
+      },
+      support: async () => {
+        const [users, tix] = await Promise.all([D.users(), D.tix()]);
+        return `<h1>Support tickets</h1>${tix.sort(byDate).map(t => `<div class="card" style="margin:.7rem 0"><b>${esc(t.subject)}</b> <span class="mute">${esc(users.find(u => u.id === t.uid)?.name)}</span><p>${esc(t.message)}</p>
       <form class="wide rf row" data-t="${t.id}"><input name="r" value="${esc(t.reply || '')}" placeholder="Reply"><button>Reply</button></form></div>`).join('') || '<p class="mute">No tickets.</p>'}`;
-    S.top = `<h1>Top users</h1><p class="mute">Ranked by <b>approved</b> points only (reviewed and partner-confirmed). Flagged and suspended accounts are left out, and names are shortened. Only share names of members who are comfortable with it.</p>
-      <div class="chips" id="topchips"><button type="button" data-p="week" class="on">This week</button><button type="button" data-p="month" class="alt">This month</button><button type="button" data-p="all" class="alt">All time</button></div>
-      <div id="topbox"><p class="mute">Loading…</p></div>`;
-    const tabs = [['overview', 'Overview', 0], ['review', 'Review', queue.length], ['payments', 'Payments', toPay.length], ['top', 'Top users', 0], ['opportunities', 'Opportunities', 0], ['users', 'Users', sus.length], ['partners', 'Partners', 0], ['campaigns', 'Campaigns', 0], ['support', 'Support', attention[2][1]]];
-    const cur = S[tab] ? tab : 'overview';
-    return `<div class="admin"><aside class="side"><div class="side-h">Admin</div><nav>${tabs.map(([k, l, n]) => `<a href="#/admin/${k}" class="${k === cur ? 'on' : ''}">${l}${n ? `<span class="badge">${n}</span>` : ''}</a>`).join('')}</nav></aside><section class="panel">${S[cur]}</section></div>`;
+      }
+    };
+    const Bp = D.badges(), [B, body] = await Promise.all([Bp, S[cur](Bp)]);
+    return `<div class="admin"><aside class="side"><div class="side-h">Admin</div><nav>${tabs.map(([k, l]) => { const n = badgeOf(B, k); return `<a href="#/admin/${k}" class="${k === cur ? 'on' : ''}">${l}${n ? `<span class="badge">${n}</span>` : ''}</a>`; }).join('')}</nav></aside><section class="panel">${body}</section></div>`;
   }
 };
 
@@ -324,22 +391,25 @@ const bind = {
     f.amt.addEventListener('input', sync); sync();
     f.onsubmit = async e => {
       e.preventDefault(); if (!ok()) return; btn.disabled = true;
-      try { await call('requestWithdrawal')({ amount: +f.amt.value }); location.hash = '#/withdraw'; route(); } catch (x) { msg(0, err(x)); sync(); }
+      try { await call('requestWithdrawal')({ amount: +f.amt.value }); bust('wdOpen', 'wdDone', 'badges'); location.hash = '#/withdraw'; route(); } catch (x) { msg(0, err(x)); sync(); }
     };
   },
-  support() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); await addDoc(collection(db, 'tickets'), { uid: user.uid, subject: f.s.value, message: f.m.value, createdAt: serverTimestamp(), reply: '' }); route(); }; },
+  support() { const f = $('#f'); f.onsubmit = async e => { e.preventDefault(); await addDoc(collection(db, 'tickets'), { uid: user.uid, subject: f.s.value, message: f.m.value, createdAt: serverTimestamp(), reply: '' }); bust('tix', 'badges'); route(); }; },
   admin() {
     if (!isAdmin) return;   // page shows 'Admins only.'; nothing to bind
     const F = id => $(id) || {};   // forms exist only on some tabs
-    const act = fn => async e => { try { await fn(e); route(); } catch (x) { alert(err(x)); } };
-    $('#seed')?.addEventListener('click', act(() => call('adminSeedOpportunities')()));
-    $('#addbtn')?.addEventListener('click', act(async () => { const r = await call('adminAddOpportunity')(); alert(`Created ${r.code} (paused). Open it, fill in the URL, reward and requirements, then tick Active.`); }));
+    // After an action only the data it changed is cleared from the cache (plus the sidebar counts); the current tab reloads just that.
+    // Passing no keys clears everything.
+    const act = (fn, ...keys) => async e => { try { await fn(e); bust(...(keys.length ? [...keys, 'badges'] : [])); route(); } catch (x) { alert(err(x)); } };
+    $('#seed')?.addEventListener('click', act(() => call('adminSeedOpportunities')(), 'opps'));
+    $('#addbtn')?.addEventListener('click', act(async () => { const r = await call('adminAddOpportunity')(); alert(`Created ${r.code} (paused). Open it, fill in the URL, reward and requirements, then tick Active.`); }, 'opps'));
     if ($('#topbox')) {   // Top users tab: analyse, show the best user, build a WhatsApp message
       const medals = ['🥇', '🥈', '🥉'], names = { week: 'this week', month: 'this month', all: 'of all time' };
+      const topCache = {};   // report per period, kept for 10 minutes (each run reads many documents on the server)
       const load = async period => {
         $('#topbox').innerHTML = '<p class="mute">Analysing…</p>';
         try {
-          const r = await call('adminTopUsers')({ period }), b = r.board;
+          const hit = topCache[period], r = hit && Date.now() - hit.t < 600e3 ? hit.r : (topCache[period] = { t: Date.now(), r: await call('adminTopUsers')({ period }) }).r, b = r.board;
           if (!b.length) { $('#topbox').innerHTML = note('No approved activity for this period yet.'); return; }
           const top = b[0], link = location.origin + location.pathname;
           const text = `🏆 SemaRewards top earners ${names[period]}\n\n` + b.slice(0, 5).map((u, i) => `${medals[i] || (i + 1) + '.'} ${u.name} · ${u.points.toLocaleString()} pts${u.activities != null ? ` · ${u.activities} tasks` : ''}`).join('\n')
@@ -361,21 +431,22 @@ const bind = {
       load('week');
     }
     RV.bind();   // Review tab: search, filters, approve / reject, approve all per user
+    $('#rvlist')?.addEventListener('click', e => { if (e.target.closest('button')) reviewDirty = true; });
     app.querySelectorAll('.of').forEach(f => f.onsubmit = act(e => { e.preventDefault(); const v = n => f.elements[n].value;
       return call('adminUpdateOpportunity')({ id: f.dataset.id, title: v('title'), provider: v('provider'), partnerId: v('partnerId'), providerZoneId: v('providerZoneId'), destinationUrl: v('destinationUrl'),
         trackingParam: v('trackingParam'), activityType: v('activityType'), rewardPoints: +v('rewardPoints'), cooldownMinutes: +v('cooldownMinutes'), requirements: v('requirements'),
-        incentiveApproved: f.elements.incentiveApproved.checked, providerPermissionNote: v('providerPermissionNote'), active: f.elements.active.checked }); }));
+        incentiveApproved: f.elements.incentiveApproved.checked, providerPermissionNote: v('providerPermissionNote'), active: f.elements.active.checked }); }, 'opps'));
     app.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => { b.textContent = 'Copied'; }, () => {}));
     app.querySelectorAll('[data-w]').forEach(b => b.onclick = act(() => {
       const paid = b.dataset.d === 'paid';
       const n = prompt(paid ? 'Enter the M-Pesa confirmation code for this payment (e.g. SGH7K2L9QX):' : 'Reason for rejecting (the user\'s balance will be refunded):'); if (n === null) return;
       if (!paid || confirm('Confirm: you have already sent this payment through M-Pesa?')) return call('adminDecideWithdrawal')({ id: b.dataset.w, decision: b.dataset.d, note: n.trim() });
-    }));
-    app.querySelectorAll('[data-st]').forEach(b => b.onclick = act(() => call('adminSetUserStatus')({ uid: b.dataset.uid, status: b.dataset.st })));
-    app.querySelectorAll('[data-c]').forEach(b => b.onclick = act(() => updateDoc(doc(db, 'campaigns', b.dataset.c), { active: b.dataset.on === 'true' })));
-    app.querySelectorAll('.rf').forEach(f => f.onsubmit = act(e => { e.preventDefault(); return updateDoc(doc(db, 'tickets', f.dataset.t), { reply: f.r.value }); }));
-    F('#pf').onsubmit = act(e => { e.preventDefault(); const s = [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join(''); return addDoc(collection(db, 'partners'), { name: e.target.n.value, secret: s, createdAt: serverTimestamp() }); });
-    F('#payf').onsubmit = act(e => { e.preventDefault(); const f = e.target; return addDoc(collection(db, 'partnerPayments'), { partnerId: f.p.value, amount: +f.a.value, ref: f.r.value, createdAt: serverTimestamp() }); });
-    F('#cf').onsubmit = act(async e => { e.preventDefault(); const f = e.target; const r = await addDoc(collection(db, 'campaigns'), { partnerId: f.p.value, title: f.t.value, url: f.u.value, reward: +f.rw.value, type: f.ty.value, requirements: f.q.value, active: true, createdAt: serverTimestamp() }); await setDoc(doc(db, 'campaignCosts', r.id), { payout: +f.po.value }); });
+    }, 'wdOpen', 'wdDone'));
+    app.querySelectorAll('[data-st]').forEach(b => b.onclick = act(() => call('adminSetUserStatus')({ uid: b.dataset.uid, status: b.dataset.st }), 'users'));
+    app.querySelectorAll('[data-c]').forEach(b => b.onclick = act(() => updateDoc(doc(db, 'campaigns', b.dataset.c), { active: b.dataset.on === 'true' }), 'camps'));
+    app.querySelectorAll('.rf').forEach(f => f.onsubmit = act(e => { e.preventDefault(); return updateDoc(doc(db, 'tickets', f.dataset.t), { reply: f.r.value }); }, 'tix'));
+    F('#pf').onsubmit = act(e => { e.preventDefault(); const s = [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join(''); return addDoc(collection(db, 'partners'), { name: e.target.n.value, secret: s, createdAt: serverTimestamp() }); }, 'partners');
+    F('#payf').onsubmit = act(e => { e.preventDefault(); const f = e.target; return addDoc(collection(db, 'partnerPayments'), { partnerId: f.p.value, amount: +f.a.value, ref: f.r.value, createdAt: serverTimestamp() }); }, 'pays');
+    F('#cf').onsubmit = act(async e => { e.preventDefault(); const f = e.target; const r = await addDoc(collection(db, 'campaigns'), { partnerId: f.p.value, title: f.t.value, url: f.u.value, reward: +f.rw.value, type: f.ty.value, requirements: f.q.value, active: true, createdAt: serverTimestamp() }); await setDoc(doc(db, 'campaignCosts', r.id), { payout: +f.po.value }); }, 'camps');
   }
 };
