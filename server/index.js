@@ -255,7 +255,13 @@ api('getReferralCode', async ({ auth }) => ({ code: await referrals.ensureReferr
 
 api('adminSetUserStatus', async ({ auth, data }) => {
   await adminOnly({ auth }); if (!['active', 'flagged', 'suspended'].includes(data.status)) throw new HttpsError('invalid-argument', 'Bad status');
-  await db.doc('users/' + data.uid).update({ status: data.status }); return { ok: true };
+  const ref = db.doc('users/' + data.uid); if (!(await ref.get()).exists) throw new HttpsError('not-found', 'User not found.');
+  // "Clear" (status active) must also empty the flags list. Before, only the status changed, so the account stayed in
+  // Suspicious accounts and was still left out of the Top users report, because both check the flags list.
+  const upd = { status: data.status }; if (data.status === 'active') upd.flags = [];
+  await ref.update(upd);
+  await db.collection('adminAudit').add({ type: 'user_status_' + data.status, adminUid: auth.uid, uid: data.uid, createdAt: FV.serverTimestamp() });
+  return { ok: true };
 });
 
 app.listen(process.env.PORT || 3000, () => console.log('SemaAfrica server running'));
