@@ -65,14 +65,8 @@ export function createUserUI(c) {
   let E = { opps: [], passed: new Set(), until: {}, moved: null };
 
   // ---------- Visit-time check: the SERVER measures the time; this page only says "I'm back" ----------
-  const GATE_ON = true, FREE_TASKS = 1;   // keep in sync with VISIT_GATE=on and VISIT_FREE_TASKS on the server
-  const lockedIds = () => {
-    if (!GATE_ON) return new Set();
-    const ch = E.opps.filter(x => !ADULT_CODES.includes(x.code)), done = ch.filter(x => E.passed.has(x.id)).length;
-    return new Set(ch.filter((x, i) => i >= FREE_TASKS + done).map(x => x.id));
-  };
-  const lockCard = x => `<div class="card opp locked"><div><span class="tag">${esc(x.code)}</span> <span class="mute">${esc(x.provider)}</span></div><b>${esc(x.title)}</b>
-    <div class="mute">🔒 Locked. Pass a task you have unlocked to open this one.</div></div>`;
+  const VISIT_MAX_MS = 180000;   // keep in sync with VISIT_MAX_SECONDS on the server (default 180)
+  const activeVisit = () => { const v = loadV(); return v && Date.now() - v.t <= VISIT_MAX_MS ? v : null; };   // task started but not yet passed
   const WAIT_BOX = `<div class="msg" role="status">⏱ Visit started. Stay on the partner page until it has loaded, then come back here.
     <p class="acts"><button id="vcheck" type="button" class="alt">I'm back: check my visit</button></p></div>`;
   const retryBox = t => `<div class="msg" role="status"><b>${esc(t)}</b><p class="acts"><button id="vretry" type="button">Try again</button></p></div>`;
@@ -83,6 +77,7 @@ export function createUserUI(c) {
   async function beginVisit(id, url) {
     try { await call('startVisit')({ opportunityId: id }); } catch (e) { console.error('startVisit', e); return; }
     sessionStorage.rh_visit = JSON.stringify({ id, url, t: Date.now() });
+    setTimeout(() => { if (location.hash.startsWith('#/earn')) paintEarn(); }, VISIT_MAX_MS + 500);   // lock ends if the user never comes back
   }
   async function retryVisit() {
     const p = loadV(); if (!p) return;
@@ -107,25 +102,27 @@ export function createUserUI(c) {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReturn(); });
   window.addEventListener('pageshow', checkReturn);
 
-  const readyCard = x => `<div class="card opp" data-oid="${esc(x.id)}"><div><span class="tag">${esc(x.code)}</span>${adultTag(x.code)} <span class="mute">${esc(x.provider)}</span></div>
+  const readyCard = (x, busy) => `<div class="card opp" data-oid="${esc(x.id)}"><div><span class="tag">${esc(x.code)}</span>${adultTag(x.code)} <span class="mute">${esc(x.provider)}</span></div>
     <b>${esc(x.title)}</b><div class="big">${ptsVal(x.rewardPoints)}</div>
     <div class="mute">After partner confirmation and review · repeat every ${esc(x.cooldownMinutes)} min</div>
-    <p class="acts"><button data-start="${esc(x.id)}">Start task</button><a class="btn alt" href="#/opportunity/${esc(x.id)}">Details</a></p></div>`;
+    ${busy ? '<div class="mute">🔒 Finish your current task first.</div>' : ''}<p class="acts"><button data-start="${esc(x.id)}" ${busy ? 'disabled' : ''}>${busy ? 'Locked' : 'Start task'}</button><a class="btn alt" href="#/opportunity/${esc(x.id)}">Details</a></p></div>`;
   const coolCard = x => { const u = E.until[x.id], d = dur(x); return `<div class="card opp cool ${E.moved === x.id ? 'pop' : ''}">
     <div><span class="tag">${esc(x.code)}</span>${adultTag(x.code)} <span class="mute">${esc(x.provider)}</span></div><b>${esc(x.title)}</b>
     <div class="mute">${pts(x.rewardPoints)} · timer running</div>${barHtml(u, d)}
     <div class="mute" data-until="${u}" data-dur="${d}" data-live="1"></div>
     <p class="acts"><a class="btn alt" href="#/opportunity/${esc(x.id)}">Details</a></p></div>`; };
   const earnBox = () => {
-    const now = Date.now(), isCool = x => (E.until[x.id] || 0) > now;
-    const cool = E.opps.filter(isCool).sort((a, b) => E.until[a.id] - E.until[b.id]), lock = lockedIds(), ready = E.opps.filter(x => !isCool(x) && !lock.has(x.id)), locked = E.opps.filter(x => lock.has(x.id));
-    return `<h2>Available now <span class="badge">${ready.length}</span></h2>` +
-      (ready.length ? `<div class="grid">${ready.map(readyCard).join('')}</div>` : note(cool.length ? 'You have started everything that is available. The next one unlocks when its timer below finishes.' : 'No opportunities right now. Check back soon.')) +
-      (cool.length ? `<h2>Waiting for timer <span class="badge">${cool.length}</span></h2><div class="grid">${cool.map(coolCard).join('')}</div>` : '') +
-      (locked.length ? `<h2>Locked <span class="badge">${locked.length}</span></h2><div class="grid">${locked.map(lockCard).join('')}</div>` : '');
+    const now = Date.now(), isCool = x => (E.until[x.id] || 0) > now, act = activeVisit();
+    const cool = E.opps.filter(isCool).sort((a, b) => E.until[a.id] - E.until[b.id]), ready = E.opps.filter(x => !isCool(x));
+    const cur = act && E.opps.find(x => x.id === act.id);
+    const banner = act ? `<div class="msg" role="status">One task at a time: finish ${cur ? esc(cur.code) : 'your current task'} first. Stay on the partner page until it loads, then come back and tap below to unlock the other tasks.
+      <p class="acts"><button type="button" class="alt" data-check>I'm back: check my visit</button></p></div>` : '';
+    return banner + `<h2>Available now <span class="badge">${ready.length}</span></h2>` +
+      (ready.length ? `<div class="grid">${ready.map(x => readyCard(x, act && act.id !== x.id)).join('')}</div>` : note(cool.length ? 'You have started everything that is available. The next one unlocks when its timer below finishes.' : 'No opportunities right now. Check back soon.')) +
+      (cool.length ? `<h2>Waiting for timer <span class="badge">${cool.length}</span></h2><div class="grid">${cool.map(coolCard).join('')}</div>` : '');
   };
   function paintEarn() { const b = $('#earnbox'); if (!b) return; b.innerHTML = earnBox(); E.moved = null; wireEarn(); countdowns(paintEarn); }
-  function wireEarn() { app.querySelectorAll('[data-start]').forEach(b => b.onclick = () => startOpp(b.dataset.start, b)); }
+  function wireEarn() { app.querySelectorAll('[data-start]').forEach(b => b.onclick = () => startOpp(b.dataset.start, b)); app.querySelectorAll('[data-check]').forEach(b => b.onclick = checkReturn); }
   async function startOpp(id, btn) {
     if (btn.disabled) return; btn.disabled = true; const label = btn.textContent; btn.textContent = 'Starting…';
     const w = window.open('about:blank', '_blank');   // opened first so mobile pop-up blockers allow it
@@ -174,6 +171,7 @@ export function createUserUI(c) {
     const setUntil = ms => { $('#cd').dataset.until = ms; b.disabled = ms > Date.now(); countdowns(); };
     const msg = t => { $('#m').innerHTML = note(t); };
     b.onclick = async () => {
+      const act = activeVisit(); if (act && act.id !== id) { msg('Finish the task you started first, then come back here and tap "I\'m back: check my visit".'); return; }
       b.disabled = true; const w = window.open('about:blank', '_blank');
       try {
         const r = await call('startOpportunity')({ opportunityId: id });
