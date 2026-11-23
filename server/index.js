@@ -251,6 +251,7 @@ const apiWithReferrals = (name, fn) => api(name, async c => {
 });
 require('./points')({ app, api: apiWithReferrals, db, admin, HttpsError, uidOf, adminOnly });
 require('./admin-extras')({ api, db, admin, FV, adminOnly, HttpsError });   // add more BTNs + top users report
+require('./admin-bulk')({ api, db, FV, HttpsError, adminOnly, referrals, streaks });   // approve many activities of one user in one request
 api('getReferralCode', async ({ auth }) => ({ code: await referrals.ensureReferralCode(uidOf({ auth })) }));
 
 api('adminSetUserStatus', async ({ auth, data }) => {
