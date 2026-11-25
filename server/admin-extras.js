@@ -21,6 +21,41 @@ module.exports = ({ api, db, admin, FV, adminOnly, HttpsError }) => {
     throw new HttpsError('already-exists', 'Could not create a new BTN. Try again.');
   });
 
+  // Reject several activities at once (checkboxes in the Review tab). Same rules as the single reject in points.js:
+  // a reason is required, only "started" / "pending_review" tasks can be rejected, you cannot review your own task.
+  // Each user's balance is updated once, in one transaction.
+  api('adminRejectMany', async ({ auth, data }) => {
+    await adminOnly({ auth });
+    const ids = [...new Set((Array.isArray(data.attemptIds) ? data.attemptIds : []).map(String))].slice(0, 200);
+    const note = String(data.note || '').trim().slice(0, 500);
+    if (!ids.length) throw new HttpsError('invalid-argument', 'Select at least one activity.');
+    if (note.length < 3) throw new HttpsError('invalid-argument', 'A reason is required when rejecting.');
+    const snaps = await db.getAll(...ids.map(id => db.doc('activityAttempts/' + id)));
+    const byUser = {};
+    snaps.forEach(s => { const a = s.exists && s.data(); if (a && ['started', 'pending_review'].includes(a.status) && a.uid !== auth.uid) (byUser[a.uid] || (byUser[a.uid] = [])).push(s.ref); });
+    let rejected = 0;
+    for (const [uid, refs] of Object.entries(byUser)) {
+      const uRef = db.doc('users/' + uid);
+      rejected += await db.runTransaction(async t => {
+        const fresh = await t.getAll(...refs);   // re-read: anything already handled in the meantime is skipped
+        let pend = 0, n = 0;
+        fresh.forEach(s => {
+          const a = s.data(); if (!a || !['started', 'pending_review'].includes(a.status)) return;
+          const wasPending = a.status === 'pending_review', r = a.rewardPoints || 0; n++;
+          t.update(s.ref, { status: 'rejected', reviewedBy: auth.uid, reviewedAt: FV.serverTimestamp(), reviewNote: note });
+          if (wasPending) pend += r;
+          t.set(db.collection('pointLedger').doc(), { uid, activityAttemptId: s.id, opportunityId: a.opportunityId, adminUid: auth.uid, note, type: 'reward_rejected',
+            pendingDelta: wasPending ? -r : 0, approvedDelta: 0, createdAt: FV.serverTimestamp() });
+        });
+        if (!n) return 0;
+        if (pend) t.update(uRef, { pendingPoints: FV.increment(-pend) });
+        t.set(db.collection('adminAudit').doc(), { type: 'activity_reject_many', adminUid: auth.uid, uid, count: n, note, createdAt: FV.serverTimestamp() });
+        return n;
+      });
+    }
+    return { ok: true, rejected, skipped: ids.length - rejected };
+  });
+
   // Best users by APPROVED points only (reviewed, partner-confirmed). Flagged or suspended accounts are excluded. Names are masked.
   api('adminTopUsers', async ({ auth, data }) => {
     await adminOnly({ auth });
@@ -35,8 +70,8 @@ module.exports = ({ api, db, admin, FV, adminOnly, HttpsError }) => {
       const s = await db.collection('pointLedger').where('createdAt', '>=', since).limit(10000).get();
       truncated = s.size >= 10000;
       const agg = {};
-      s.forEach(d => { const x = d.data(); if (!x.uid || !['reward_approved', 'reward_reversed'].includes(x.type)) return;
-        const a = agg[x.uid] || (agg[x.uid] = { points: 0, activities: 0 }); a.points += x.approvedDelta || 0; a.activities += x.type === 'reward_approved' ? 1 : -1; });
+      s.forEach(d => { const x = d.data(); if (!x.uid || !['reward_approved', 'daily_points', 'reward_reversed'].includes(x.type)) return;
+        const a = agg[x.uid] || (agg[x.uid] = { points: 0, activities: 0 }); a.points += x.approvedDelta || 0; a.activities += x.type === 'reward_reversed' ? -1 : (x.taskCount || 1); });
       const ids = Object.keys(agg).filter(id => agg[id].points > 0).sort((a, b) => agg[b].points - agg[a].points);
       participants = ids.length; totalPoints = ids.reduce((t, id) => t + agg[id].points, 0);
       const top = ids.slice(0, 30), docs = top.length ? await db.getAll(...top.map(id => db.doc('users/' + id))) : [];
