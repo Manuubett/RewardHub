@@ -33,27 +33,28 @@ module.exports = ({ api, db, admin, FV, adminOnly, HttpsError }) => {
     const snaps = await db.getAll(...ids.map(id => db.doc('activityAttempts/' + id)));
     const byUser = {};
     snaps.forEach(s => { const a = s.exists && s.data(); if (a && ['started', 'pending_review'].includes(a.status) && a.uid !== auth.uid) (byUser[a.uid] || (byUser[a.uid] = [])).push(s.ref); });
-    let rejected = 0;
+    let rejected = 0; const rejectedIds = [];
     for (const [uid, refs] of Object.entries(byUser)) {
       const uRef = db.doc('users/' + uid);
-      rejected += await db.runTransaction(async t => {
+      const res = await db.runTransaction(async t => {
         const fresh = await t.getAll(...refs);   // re-read: anything already handled in the meantime is skipped
-        let pend = 0, n = 0;
+        let pend = 0, n = 0; const ids = [];
         fresh.forEach(s => {
           const a = s.data(); if (!a || !['started', 'pending_review'].includes(a.status)) return;
-          const wasPending = a.status === 'pending_review', r = a.rewardPoints || 0; n++;
+          const wasPending = a.status === 'pending_review', r = a.rewardPoints || 0; n++; ids.push(s.id);
           t.update(s.ref, { status: 'rejected', reviewedBy: auth.uid, reviewedAt: FV.serverTimestamp(), reviewNote: note });
           if (wasPending) pend += r;
           t.set(db.collection('pointLedger').doc(), { uid, activityAttemptId: s.id, opportunityId: a.opportunityId, adminUid: auth.uid, note, type: 'reward_rejected',
             pendingDelta: wasPending ? -r : 0, approvedDelta: 0, createdAt: FV.serverTimestamp() });
         });
-        if (!n) return 0;
+        if (!n) return { n: 0, ids: [] };
         if (pend) t.update(uRef, { pendingPoints: FV.increment(-pend) });
         t.set(db.collection('adminAudit').doc(), { type: 'activity_reject_many', adminUid: auth.uid, uid, count: n, note, createdAt: FV.serverTimestamp() });
-        return n;
+        return { n, ids };
       });
+      rejected += res.n; rejectedIds.push(...res.ids);
     }
-    return { ok: true, rejected, skipped: ids.length - rejected };
+    return { ok: true, rejected, skipped: ids.length - rejected, rejectedIds };   // rejectedIds: exactly which tasks were rejected, so the screen only removes those
   });
 
   // Best users by APPROVED points only (reviewed, partner-confirmed). Flagged or suspended accounts are excluded. Names are masked.
