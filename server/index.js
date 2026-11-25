@@ -25,7 +25,7 @@ const api = (name, fn) => app.post('/api/' + name, async (req, res) => {
   try {
     const h = req.headers.authorization || ''; if (!h.startsWith('Bearer ')) throw new HttpsError('unauthenticated', 'Sign in first.');
     const tok = await admin.auth().verifyIdToken(h.slice(7));
-    res.json(await fn({ auth: { uid: tok.uid, token: tok }, data: req.body || {} }));
+    res.json(await fn({ auth: { uid: tok.uid, token: tok }, data: req.body || {}, ua: req.headers['user-agent'] || '' }));
   } catch (e) {
     if (!(e instanceof HttpsError)) { console.error(e); e = e.code?.startsWith?.('auth/') ? new HttpsError('unauthenticated', 'Session expired. Log in again.') : new HttpsError('internal', 'Server error'); }
     res.status(e.status).json({ error: e.message, ...(e.extra || {}) });
@@ -240,8 +240,14 @@ const visits = require('./visits')({ api, db, FV, HttpsError, uidOf });   // vis
 // SemaAfrica points system (opportunities, cooldowns, review, ledger) lives in points.js
 // After an admin approves an activity, check whether it completes a friend's referral
 const apiWithReferrals = (name, fn) => api(name, async c => {
-  if (name === 'startOpportunity') await visits.assertUnlocked(uidOf(c), c.data.opportunityId);   // only enforced when VISIT_GATE=on
-  const out = await fn(c);
+  let lock = null, uid = null;
+  if (name === 'startOpportunity') {
+    uid = uidOf(c); const oid = String(c.data.opportunityId || '');
+    await visits.assertMobile(c);                  // phones only (admins exempt), unless MOBILE_ONLY=off
+    await visits.assertUnlocked(uid, oid);         // only enforced when VISIT_GATE=on
+    lock = await visits.acquire(uid, oid);         // one task at a time per account
+  }
+  let out; try { out = await fn(c); } catch (e) { if (lock?.fresh) await visits.release(uid); throw e; }   // a failed start must not leave the account locked
   if (name === 'adminReviewActivity' && c.data.decision === 'approve') {
     const a = await db.doc('activityAttempts/' + c.data.attemptId).get().catch(() => null);
     if (a?.exists) await referrals.onPointsApproved(a.data().uid);
