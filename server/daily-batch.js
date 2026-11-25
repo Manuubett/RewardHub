@@ -98,6 +98,17 @@ module.exports = ({ api, db, admin, FV, adminOnly, HttpsError, referrals, streak
     return { ok: true };
   });
 
+  // After points are approved for a user: referral check once, streak update once per Nairobi day.
+  async function afterApprove(uid, atts) {
+    try { await referrals.onPointsApproved(uid); } catch (e) { console.error('approve referral', e); }
+    const days = new Set();
+    for (const x of atts.slice().sort((p, q) => p.ms - q.ms)) {
+      if (!x.ms || ADULT.has(x.code)) continue;
+      const d = new Date(x.ms + NAIROBI_MS).toISOString().slice(0, 10); if (days.has(d)) continue; days.add(d);
+      try { await streaks.onApproved(x.id); } catch (e) { console.error('approve streak', e); }
+    }
+  }
+
   // ---------- Approve one user's picked tasks in ONE transaction ----------
   async function approveUser(p, day, adminUid) {
     const uRef = db.doc('users/' + p.uid), refs = p.pick.map(a => db.doc('activityAttempts/' + a.id));
@@ -117,15 +128,39 @@ module.exports = ({ api, db, admin, FV, adminOnly, HttpsError, referrals, streak
       return { n: ok.length, pts, atts: ok.map(({ ref, a }) => ({ id: ref.id, code: a.opportunityCode, ms: a.createdAt?.toMillis?.() || 0 })) };
     });
     if (!done) return null;
-    try { await referrals.onPointsApproved(p.uid); } catch (e) { console.error('batch referral', e); }   // once per user
-    const days = new Set();                                                                              // streak: once per Nairobi day
-    for (const x of done.atts.sort((a, b) => a.ms - b.ms)) {
-      if (!x.ms || ADULT.has(x.code)) continue;
-      const d = new Date(x.ms + NAIROBI_MS).toISOString().slice(0, 10); if (days.has(d)) continue; days.add(d);
-      try { await streaks.onApproved(x.id); } catch (e) { console.error('batch streak', e); }
-    }
+    await afterApprove(p.uid, done.atts);
     return done;
   }
+
+  // ---------- "Approve all" in the Review tab (one user at a time) ----------
+  // Same rules as the single approve in points.js. One ledger entry per request; referral and streak checks run afterwards.
+  api('adminReviewBulk', async ({ auth, data }) => {
+    await adminOnly({ auth });
+    const uid = String(data.uid || ''), note = String(data.note || '').trim().slice(0, 500);
+    const ids = [...new Set((Array.isArray(data.attemptIds) ? data.attemptIds : []).map(String))].slice(0, 300);
+    if (!uid || !ids.length) throw new HttpsError('invalid-argument', 'Select at least one activity.');
+    if (uid === auth.uid) throw new HttpsError('permission-denied', 'You cannot review your own activity.');
+    const uRef = db.doc('users/' + uid), refs = ids.map(id => db.doc('activityAttempts/' + id));
+    const done = await db.runTransaction(async t => {
+      const snaps = await t.getAll(uRef, ...refs);               // fresh reads: anything already handled is skipped
+      if (!snaps[0].exists) throw new HttpsError('not-found', 'User not found.');
+      let pts = 0, pend = 0; const ok = [];
+      snaps.slice(1).forEach((s, i) => {
+        const a = s.data(); if (!a || a.uid !== uid || !['started', 'pending_review'].includes(a.status)) return;
+        ok.push({ ref: refs[i], a }); const r = a.rewardPoints || 0; pts += r; if (a.status === 'pending_review') pend += r;
+      });
+      if (!ok.length) return null;
+      if (ok.some(x => x.a.status === 'started') && note.length < 10) throw new HttpsError('invalid-argument', 'No provider confirmation yet. Write a note (10+ characters) describing the evidence you checked.');
+      ok.forEach(({ ref }) => t.update(ref, { status: 'approved', reviewedBy: auth.uid, reviewedAt: FV.serverTimestamp(), reviewNote: note }));
+      t.update(uRef, { approvedPoints: FV.increment(pts), lifetimePointsEarned: FV.increment(pts), ...(pend ? { pendingPoints: FV.increment(-pend) } : {}) });
+      pLedger(t, { uid, type: 'reward_approved', pendingDelta: -pend, approvedDelta: pts, taskCount: ok.length, adminUid: auth.uid, note });
+      t.set(db.collection('adminAudit').doc(), { type: 'activity_approve_bulk', adminUid: auth.uid, uid, count: ok.length, points: pts, note, createdAt: FV.serverTimestamp() });
+      return { ids: ok.map(x => x.ref.id), atts: ok.map(({ ref, a }) => ({ id: ref.id, code: a.opportunityCode, ms: a.createdAt?.toMillis?.() || 0 })) };
+    });
+    if (!done) return { ok: true, approved: 0, skipped: ids.length, approvedIds: [] };
+    await afterApprove(uid, done.atts);
+    return { ok: true, approved: done.ids.length, skipped: ids.length - done.ids.length, approvedIds: done.ids };
+  });
 
   api('adminApproveBatch', async ({ auth, data }) => {
     await adminOnly({ auth });
