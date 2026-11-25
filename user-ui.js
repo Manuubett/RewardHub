@@ -62,6 +62,10 @@ export function createUserUI(c) {
   const COMMUNITY = `<a class="card refcard" href="${esc(COMMUNITY_URL)}" target="_blank" rel="noopener noreferrer"><div><b>Join our WhatsApp community</b><div class="mute">Chat with other members and get updates from SemaRewards.</div></div><span class="btn gold">Join on WhatsApp</span></a>`;
   const TASK_OPENED = 'Task opened in a new tab. Wait until the page has fully loaded, then come back here to start another task. If you leave early, your points will not be approved.';
 
+  // ---------- Phones only (display; the server decides, see MOBILE_ONLY on Render) ----------
+  const MOBILE_ONLY = true, IS_MOBILE = /Android|iPhone|iPod|Mobile|Windows Phone|IEMobile|Opera Mini|BlackBerry/i.test(navigator.userAgent);
+  const DESKTOP_NOTE = MOBILE_ONLY && !IS_MOBILE ? note('Tasks work on phones only. Open SemaRewards on your phone to start earning.') : '';
+
   // ---------- Earn ----------
   let E = { opps: [], passed: new Set(), until: {}, moved: null };
 
@@ -188,7 +192,7 @@ export function createUserUI(c) {
       GATE_ON ? rows(query(collection(db, 'visits'), where('uid', '==', user.uid), where('passed', '==', true))).catch(() => []) : []]);
     opps.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     E = { opps, passed: new Set(vis.map(v => v.opportunityId)), until: Object.fromEntries(cds.map(x => [x.opportunityId, x.cooldownUntil?.toMillis?.() || 0])), moved: null };
-    return `<h1>Opportunities</h1>${RATE_NOTE}${WAIT_RULE}${ADULT_NOTICE}<div id="em"></div><div id="earnbox">${earnBox()}</div>${COMMUNITY}` +
+    return `<h1>Opportunities</h1>${DESKTOP_NOTE}${RATE_NOTE}${WAIT_RULE}${ADULT_NOTICE}<div id="em"></div><div id="earnbox">${earnBox()}</div>${COMMUNITY}` +
       (camps.length ? `<h2>Cash tasks (KES)</h2><div class="grid">${camps.map(x => `<div class="card"><b>${esc(x.title)}</b>
       <div class="big">${kes(x.reward)}</div><div class="mute">${x.type === 'cpc' ? 'Paid for a valid click' : 'Paid on completed action'}</div>
       <p><a class="btn" href="#/task/${x.id}">View details</a></p></div>`).join('')}</div>` : '');
