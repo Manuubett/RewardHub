@@ -47,7 +47,7 @@
   ]
 }
 </script>
-  <meta name="monetag" content="68e9f599b400c3715439fc20fcc65248">
+<meta name="monetag" content="68e9f599b400c3715439fc20fcc65248">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#F2F6F4;--ink:#10231F;--teal:#0B3B36;--sun:#F2A900;--line:#D3DDD9;--card:#fff;--bad:#B3261E;--ok:#1B7A4B;--mute:#5B6B66;--shadow:0 1px 2px rgba(16,35,31,.06),0 6px 18px rgba(16,35,31,.05);--r:12px}
@@ -170,7 +170,6 @@ h2 .badge{margin-left:.4rem;vertical-align:middle}
 .rvg .badge{margin-left:.3rem}
 .rvname{font-size:1.15rem;font-weight:800;color:var(--teal)}
 
-
 /* ---------- Refer & Earn ---------- */
 a.card.refcard{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin:1rem 0}
 .hero-card input[readonly]{background:color-mix(in srgb,var(--bg) 92%,transparent);color:var(--ink);margin:.2rem 0 .6rem}
@@ -189,10 +188,27 @@ a.card.refcard{display:flex;justify-content:space-between;align-items:center;gap
 .rule b:first-child{display:block;margin-bottom:.3rem}.rule ol{margin:.3rem 0 0;padding-left:1.3rem}.rule li{margin:.25rem 0}.rule li::marker{color:var(--sun);font-weight:800}
 .rule.adult{border-left-color:var(--bad)}
 .tag.warn{color:var(--bad);border-color:var(--bad)}
+
+/* ---------- Telegram banner ---------- */
+#tgbanner{display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;justify-content:space-between;max-width:980px;margin:.8rem auto 0;padding:.8rem 1rem;border-radius:12px;background:var(--teal);color:var(--bg);box-shadow:var(--shadow)}
+#tgbanner[hidden]{display:none}
+#tgbanner b{display:block}
+#tgbanner span{font-size:.92rem;opacity:.9}
+#tgbanner .tgacts{display:flex;gap:.5rem;align-items:center}
+#tgbanner a{background:var(--sun);color:#10231F;text-decoration:none;font-weight:700;padding:.55rem 1rem;border-radius:9px}
+#tgbanner button{background:transparent;border:1px solid currentColor;color:inherit;min-height:0;padding:.45rem .7rem}
+@media(max-width:640px){#tgbanner{margin:.6rem .8rem 0}}
 </style></head><body>
   <!-- AD TAG: this site-wide Monetag script also runs on the Earn pages. Only keep it if Monetag confirms it is allowed alongside rewarded activities (see README, section 1). -->
   <!--script src="https://quge5.com/88/tag.min.js" data-zone="308711" async data-cfasync="false"></script>-->
 <header><b>SemaAfrica</b><nav id="nav"><span class="sk sk-pill"></span><span class="sk sk-pill"></span><span class="sk sk-pill"></span></nav></header>
+
+<!-- Telegram banner (hidden until the script below decides to show it) -->
+<div id="tgbanner" hidden role="region" aria-label="Telegram app">
+  <div><b>Earn extra points on Telegram</b><span>Watch short ads in our Telegram app and collect points. Points are redeemable to M-Pesa once approved.</span></div>
+  <div class="tgacts"><a id="tglink" href="#" target="_blank" rel="noopener">Open on Telegram</a><button type="button" id="tgclose" aria-label="Dismiss">Not now</button></div>
+</div>
+
 <main id="app">
   <div class="boot" id="boot" role="status" aria-live="polite">
     <div class="boot-brand"><span class="dot"></span>SemaRewards</div>
@@ -224,6 +240,16 @@ a.card.refcard{display:flex;justify-content:space-between;align-items:center;gap
 </main>
 <footer><a href="privacy.html">Terms</a> · <a href="privacy.html">Privacy</a> · <a href="#/home">SemaRewards by SemaAfrica</a> · Learn. Engage. Earn.</footer>
 <script>setTimeout(function(){var b=document.getElementById('boot');if(b)b.classList.add('late')},8000)</script>
+<script>
+(function () {
+  var TG_LINK = 'https://t.me/YOURNEWBOT/watch';   // CHANGE: the Watch & Earn link from BotFather
+  var b = document.getElementById('tgbanner'); if (!b) return;
+  document.getElementById('tglink').href = TG_LINK;
+  var seen = false; try { seen = localStorage.getItem('tgbanner') === '1'; } catch (e) {}
+  b.hidden = seen;
+  document.getElementById('tgclose').onclick = function () { b.hidden = true; try { localStorage.setItem('tgbanner', '1'); } catch (e) {} };
+})();
+</script>
 <script type="module" src="app.js"></script>
 <script type="module" src="dev1.js"></script>
 
