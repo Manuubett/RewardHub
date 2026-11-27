@@ -10,6 +10,8 @@ export function createAdminReview(c) {
   const OKNOTE = 'Approved by admin', NONOTE = 'Rejected by admin';   // automatic notes, nothing to type
   const BULK_MAX = 300;     // activities per bulk request (keep in sync with MAX in admin-bulk.js)
   const REJECT_MAX = 200;   // activities per "Reject selected" request (keep in sync with the 200 limit in admin-extras.js)
+  // Quick reasons for rejecting. The user can read the reason in their History page, so keep the wording neutral.
+  const REASONS = ['Left the partner page too early', 'Partner did not confirm the activity', 'Duplicate or suspicious activity', 'Task requirements were not followed'];
   const nameOf = u => u?.name || u?.fullName || u?.email || u?.phone || 'Unnamed user';
 
   if (!document.getElementById('rvsel-css')) document.head.insertAdjacentHTML('beforeend', `<style id="rvsel-css">
@@ -67,8 +69,10 @@ export function createAdminReview(c) {
       <label class="rvsl" style="margin:.2rem 0 .4rem"><input type="checkbox" id="rvall"> Select all shown (<span id="rvalln">0</span>) to reject</label>
       <div id="rvlist">${list()}</div>
       <div class="rvselbar" id="rvsel" hidden role="region" aria-label="Reject selected activities"><b id="rvcount"></b>
-        <input type="text" id="rvreason" value="${esc(NONOTE)}" maxlength="500" aria-label="Reason for rejecting" placeholder="Reason (shown in the record)">
-        <button class="bad" id="rvrej" type="button">Reject selected</button><button class="alt" id="rvclr" type="button">Clear</button></div>
+        <select id="rvpick" aria-label="Quick reason"><option value="">Pick a reason…</option>${REASONS.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}<option value="__other">Other (type your own)</option></select>
+        <input type="text" id="rvreason" value="" maxlength="500" required aria-label="Reason for rejecting all selected" placeholder="One reason for all selected (required)">
+        <button class="bad" id="rvrej" type="button">Reject selected</button><button class="alt" id="rvclr" type="button">Clear</button>
+        <div class="mute" style="flex:1 1 100%;font-size:.8rem">This one reason is saved on every selected activity. The user can read it in their History.</div></div>
       <h2>Recently decided</h2><div class="scroll"><table><tr><th>User</th><th>When</th><th>Code</th><th>Points</th><th>Status</th></tr>${decided.slice(0, 50).join('') || '<tr><td colspan=5>None yet.</td></tr>'}</table></div>`;
   }
   // Keeps every checkbox, the "N selected" bar and the select-all boxes in step with the `sel` set.
@@ -118,7 +122,7 @@ export function createAdminReview(c) {
   async function rejectSel() {
     if (busy) return; const items = selItems(); if (!items.length) return;
     const reason = ($('#rvreason').value || '').trim();
-    if (reason.length < 3) { alert('Type a reason (at least 3 characters).'); $('#rvreason').focus(); return; }
+    if (reason.length < 3) { alert('Add one reason for the selected activities first (pick one or type your own, at least 3 characters).'); $('#rvreason').focus(); return; }
     const users = new Set(items.map(a => a.uid)).size;
     if (!confirm(`Reject ${items.length} activit${items.length === 1 ? 'y' : 'ies'} (${sumPts(items)} pts) from ${users} user${users === 1 ? '' : 's'}?\n\nReason: ${reason}\n\nThis cannot be undone from this screen.`)) return;
     busy = true; const b = $('#rvrej'), clr = $('#rvclr'); b.disabled = clr.disabled = true;
@@ -130,7 +134,9 @@ export function createAdminReview(c) {
         rejected += r.rejected || 0; skipped += r.skipped || 0; drop(r.rejectedIds || []);
       } catch (x) { failMsg = err(x); break; }
     }
-    busy = false; const b2 = $('#rvrej'), c2 = $('#rvclr'); if (b2) { b2.disabled = false; b2.textContent = 'Reject selected'; } if (c2) c2.disabled = false; paint();
+    busy = false; const b2 = $('#rvrej'), c2 = $('#rvclr'); if (b2) { b2.disabled = false; b2.textContent = 'Reject selected'; } if (c2) c2.disabled = false;
+    if (!failMsg) { $('#rvreason').value = ''; $('#rvpick').value = ''; }   // the next batch needs a fresh reason
+    paint();
     if (failMsg || skipped) alert(`${rejected} rejected` + (skipped ? `, ${skipped} skipped (already handled, or your own account)` : '') + (failMsg ? `.\nStopped: ${failMsg}` : '.'));
   }
   function bind() {
@@ -147,6 +153,7 @@ export function createAdminReview(c) {
       syncSel();
     };
     $('#rvall').onchange = e => { const on = e.target.checked; visible().forEach(g => g.items.forEach(a => on ? sel.add(a.id) : sel.delete(a.id))); render(); };
+    $('#rvpick').onchange = e => { const v = e.target.value, r = $('#rvreason'); r.value = v === '__other' ? '' : v; if (v) r.focus(); };
     $('#rvrej').onclick = rejectSel;
     $('#rvclr').onclick = () => { sel.clear(); render(); };
     $('#rvq').oninput = e => { clearTimeout(t); t = setTimeout(() => { S.q = e.target.value; render(); }, 150); };
