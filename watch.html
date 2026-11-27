@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Watch &amp; Earn</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<!-- MONETAG: SDK for the zone of THIS Mini App (replace 12363732 here and in AD_FN below if you create a new zone) -->
+<script src="//libtl.com/sdk.js" data-zone="12363732" data-sdk="show_12363732"></script>
+<style>
+:root{--bg:#eef3f0;--ink:#12281f;--card:#fff;--line:#cfdcd5;--green:#0a7b4b;--sun:#f2b705;--mute:#5b6f66}
+@media(prefers-color-scheme:dark){:root{--bg:#0c1614;--ink:#e6f0ed;--card:#142320;--line:#263a36;--mute:#93a8a2;--green:#6fd9a0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif;padding:20px 18px calc(24px + env(safe-area-inset-bottom,0px))}
+main{max-width:480px;margin:0 auto}
+h1{margin:0 0 4px;font-size:28px}.mute{color:var(--mute);font-size:14px}.hide{display:none!important}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin:14px 0}
+.big{font-size:44px;font-weight:800;line-height:1.1}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:10px 0 4px}.bar i{display:block;height:100%;background:var(--green)}
+input,button{font:inherit;width:100%;border-radius:12px;padding:13px 14px;margin-top:8px}
+input{border:1.5px solid var(--line);background:var(--card);color:var(--ink)}
+button{border:0;background:var(--ink);color:var(--bg);font-weight:700;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}.gold{background:var(--sun);color:#12281f}
+#msg{min-height:24px;margin:8px 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>Watch &amp; Earn</h1>
+  <p class="mute">Watch ads, collect points. <span id="rate"></span> Payment requests need KES 100 approved.</p>
+  <div id="msg" role="status"></div>
+
+  <section id="open" class="hide card">Open this app from Telegram to sign in.</section>
+  <section id="load" class="card">Loading...</section>
+
+  <section id="setup" class="hide card">
+    <b>One last step</b>
+    <p class="mute">Add the M-Pesa number you want to be paid on. One account per phone number.</p>
+    <input id="name" placeholder="Full name" autocomplete="name">
+    <input id="phone" placeholder="M-Pesa number, e.g. 0712345678" inputmode="numeric" autocomplete="tel">
+    <button id="save">Save and continue</button>
+  </section>
+
+  <section id="main" class="hide">
+    <div class="card"><div class="mute">Approved points</div><div class="big" id="pts">0</div><div class="mute" id="kes"></div></div>
+    <div class="card">
+      <div class="mute" id="today"></div>
+      <div class="bar"><i id="prog" style="width:0"></i></div>
+      <div class="mute" id="next"></div>
+      <button class="gold" id="watch">Watch an ad</button>
+    </div>
+    <div class="card">
+      <b>Request payment</b>
+      <p class="mute">Sent to your M-Pesa number after review.</p>
+      <input id="amt" type="number" min="100" step="1" placeholder="Amount in KES (min 100)">
+      <button id="pay" disabled>Request payment</button>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { auth, db, API_URL } from './firebase-config.js';
+import { signInWithCustomToken, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { doc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+const AD_FN = 'show_12363732';   // Monetag function name for your zone
+const MIN_PAY = 100, PTS_PER_KES = 10;
+const tg = window.Telegram && window.Telegram.WebApp, $ = id => document.getElementById(id);
+if (tg) { tg.ready(); tg.expand(); }
+const base = API_URL.replace(/\/+$/, '');
+const say = t => { $('msg').textContent = t || ''; };
+const show = id => ['open', 'load', 'setup', 'main'].forEach(s => $(s).classList.toggle('hide', s !== id));
+const call = n => async d => {
+  const r = await fetch(base + '/api/' + n, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await auth.currentUser.getIdToken() }, body: JSON.stringify(d || {}) });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Could not reach the server.'); return j;
+};
+let profile = null, ads = { count: 0, cap: 24, perPoint: 3, toNext: 3 }, unsub = null, tried = false, busy = false;
+
+function paintAds() {
+  $('rate').textContent = `${ads.perPoint} ads = 1 point. ${PTS_PER_KES} points = KES 1.`;
+  $('today').textContent = `${ads.count} of ${ads.cap} ads watched today`;
+  $('prog').style.width = ((ads.perPoint - ads.toNext) % ads.perPoint) / ads.perPoint * 100 + '%';
+  $('next').textContent = ads.count >= ads.cap ? 'Daily limit reached. Come back tomorrow.' : `${ads.toNext || ads.perPoint} more ad${(ads.toNext || ads.perPoint) > 1 ? 's' : ''} for your next point`;
+  $('watch').disabled = busy || ads.count >= ads.cap;
+}
+const availKes = () => Math.floor((profile.approvedPoints || 0) / PTS_PER_KES) + Math.max(0, profile.approved || 0);
+function render() {
+  if (!profile) { $('name').value = $('name').value || sessionStorage.tgname || ''; show('setup'); return; }
+  $('pts').textContent = (profile.approvedPoints || 0).toLocaleString();
+  $('kes').textContent = `about KES ${availKes().toLocaleString()} available to request`;
+  $('amt').max = availKes(); $('pay').disabled = availKes() < MIN_PAY;
+  paintAds(); show('main');
+}
+
+onAuthStateChanged(auth, async u => {
+  unsub?.(); unsub = null;
+  if (!u) {
+    if (tried) return; tried = true;
+    if (!(tg && tg.initData)) return show('open');
+    try {
+      const r = await fetch(base + '/auth/telegram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Login failed');
+      sessionStorage.tgname = j.name || ''; await signInWithCustomToken(auth, j.token);
+    } catch (e) { say(e.message); show('open'); }
+    return;
+  }
+  unsub = onSnapshot(doc(db, 'users', u.uid), s => { profile = s.exists() ? s.data() : null; render(); }, () => say('Could not load your account.'));
+  try { ads = await call('adStatus')(); paintAds(); } catch (e) { say(e.message); }
+});
+
+$('save').onclick = async () => {
+  const name = $('name').value.trim().replace(/\s+/g, ' '), phone = $('phone').value.trim();
+  if (name.length < 2) return say('Enter your full name.');
+  $('save').disabled = true; say('');
+  try { await call('registerProfile')({ name, phone, deviceId: localStorage.rh_dev || (localStorage.rh_dev = crypto.randomUUID()), referralCode: '' }); }
+  catch (e) { say(e.message); } finally { $('save').disabled = false; }
+};
+
+$('watch').onclick = async () => {
+  if (busy) return; busy = true; paintAds(); say('');
+  try {
+    const { token } = await call('startAd')();
+    if (typeof window[AD_FN] !== 'function') throw new Error('Ads are not available right now. Try again later.');
+    await window[AD_FN]();                       // plays the rewarded ad inside the app
+    ads = await call('claimAd')({ token });      // the server checks timing and limits, then credits points
+    say(ads.awarded ? '+1 point added!' : 'Ad counted.');
+    try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
+  } catch (e) { say(e.message || 'The ad did not complete. No points added.'); }
+  finally { busy = false; paintAds(); }
+};
+
+$('amt').oninput = () => { const v = Number($('amt').value); $('pay').disabled = !(Number.isInteger(v) && v >= MIN_PAY && v <= availKes()); };
+$('pay').onclick = async () => {
+  $('pay').disabled = true;
+  try { await call('requestWithdrawal')({ amount: Number($('amt').value) }); say('Payment requested. We will send it to your M-Pesa number after review.'); $('amt').value = ''; }
+  catch (e) { say(e.message); }
+};
+</script>
+</body>
+</html>
